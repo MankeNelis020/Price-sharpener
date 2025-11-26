@@ -1,7 +1,7 @@
-/** PRODUCTINFO & PRODUCTFIELD — v7c (decode HTML entities + robust EAN) **/
+/** PRODUCTINFO & PRODUCTFIELD — v7d (decode HTML entities + robust EAN + MPN fallback) **/
 
 /* -------- Patches -------- */
-const CACHE_VER      = "v7c";    // bump cache to refresh
+const CACHE_VER      = "v7d";    // bump cache to refresh
 const MAX_DESC       = 1200;
 const MAX_TITLE      = 300;
 const SAFE_CELL_MAX  = 49000;
@@ -93,6 +93,17 @@ function sanitizeEAN_(s){
   return (t.length>=8 && t.length<=14) ? t : "";       // GTIN-8/12/13/14
 }
 
+function sanitizeMPN_(s){
+  if(!s) return "";
+  const cleaned=String(s)
+    .replace(/<[^>]*>/g,"")
+    .replace(/[\u0000-\u001f]/g,"")
+    .trim()
+    .replace(/\s+/g," ");
+  if(!cleaned) return "";
+  return cleaned.length>80 ? cleaned.slice(0,80) : cleaned;
+}
+
 function extractEANFromHtml_(html){
   if(!html) return "";
   const candidates=[];
@@ -116,6 +127,29 @@ function extractEANFromHtml_(html){
       .map(v => String(v||"").replace(/\D/g,""))
       .filter(s => s.length>=8 && s.length<=14)
   )];
+  if(!cleaned.length) return "";
+  cleaned.sort((a,b)=>b.length-a.length);
+  return cleaned[0];
+}
+
+function extractMPNFromHtml_(html){
+  if(!html) return "";
+  const candidates=[];
+
+  const reMeta=/<(?:meta|span|div)[^>]+(?:itemprop|property|name)=["']mpn["'][^>]+?(?:content|value)?=["']?([^"'>]{3,120})["']?/gi;
+  let m;
+  while((m=reMeta.exec(html))!==null) candidates.push(m[1]);
+
+  const reData=/data-mpn\s*=\s*["']([^"']{3,120})["']/gi;
+  while((m=reData.exec(html))!==null) candidates.push(m[1]);
+
+  const reJson=/["']mpn["']\s*[:=]\s*["']([^"']{3,120})["']/gi;
+  while((m=reJson.exec(html))!==null) candidates.push(m[1]);
+
+  const reText=/\bMPN\b[^A-Za-z0-9]{0,10}([A-Za-z0-9][A-Za-z0-9._\-\s]{2,80})/gi;
+  while((m=reText.exec(html))!==null) candidates.push(m[1]);
+
+  const cleaned=[...new Set(candidates.map(sanitizeMPN_).filter(Boolean))];
   if(!cleaned.length) return "";
   cleaned.sort((a,b)=>b.length-a.length);
   return cleaned[0];
@@ -153,7 +187,8 @@ function extractProductData_(html, url){
   out.model = firstNonEmpty_([ getDeep_(productNode,"model"), getDeep_(productNode,"mpn"), meta["model"] ]);
   out.color = firstNonEmpty_([ getDeep_(productNode,"color"), meta["color"] ]);
   out.sku   = firstNonEmpty_([ getDeep_(productNode,"sku"),  meta["sku"] ]);
-  out.mpn   = firstNonEmpty_([ getDeep_(productNode,"mpn"),  meta["mpn"] ]);
+  out.mpn   = sanitizeMPN_(firstNonEmpty_([ getDeep_(productNode,"mpn"), meta["mpn"], og["product:mpn"] ]))
+              || extractMPNFromHtml_(html);
 
   // --- ROBUST GTIN/EAN ---
   out.gtin = sanitizeEAN_(firstNonEmpty_([
