@@ -233,6 +233,7 @@ const CONFIG = {
   SHEET_NAME: 'Blad1',   // pas aan als je tab anders heet (bijv. 'Babyproducten')
   FIRST_ROW: 2,          // eerste data-rij
   COL_URL: 1,            // A = URL
+  COL_GTIN: 4,           // D = GTIN (voor tab "Concurrenten")
   COL_LAST_PRICE: 7,     // G = Laatste prijs
   COL_PREV_PRICE: 8,     // H = Vorige prijs
   COL_LOWEST_PRICE: 9,   // I = Laagste prijs
@@ -254,6 +255,7 @@ function refreshPricesAndNotify() {
 
   // alles in één keer inlezen
   const urls   = sh.getRange(CONFIG.FIRST_ROW, CONFIG.COL_URL,          numRows, 1).getValues();
+  const gtins  = sh.getRange(CONFIG.FIRST_ROW, CONFIG.COL_GTIN,         numRows, 1).getValues();
   const watchs = sh.getRange(CONFIG.FIRST_ROW, CONFIG.COL_WATCH,        numRows, 1).getValues();
   const lastPs = sh.getRange(CONFIG.FIRST_ROW, CONFIG.COL_LAST_PRICE,   numRows, 1).getValues();
   const prevPs = sh.getRange(CONFIG.FIRST_ROW, CONFIG.COL_PREV_PRICE,   numRows, 1).getValues();
@@ -274,17 +276,25 @@ function refreshPricesAndNotify() {
     const oldPrev  = Number(prevPs[i][0]) || 0;
     const oldLow   = Number(lowPs[i][0])  || 0;
 
-    // nieuwe prijs via PRODUCTFIELD
-    let raw;
+    // productinfo één keer ophalen (met cache in PRODUCTINFO)
+    let info;
     try {
-      raw = PRODUCTFIELD(url, 'price');     // [[waarde]]
-      raw = Array.isArray(raw) ? raw[0][0] : raw;
+      const arr = PRODUCTINFO(url);
+      info = Array.isArray(arr) ? arr[0] : arr;
     } catch (e) {
       Logger.log('Fout bij PRODUCTFIELD voor rij ' + row + ' (' + url + '): ' + e);
       continue;
     }
 
+    if (!info) continue;
+
+    const priceIndex = PRODUCTINFO_HEADERS.indexOf('price');
+    const gtinIndex  = PRODUCTINFO_HEADERS.indexOf('gtin');
+    const rawPrice   = priceIndex >= 0 ? info[priceIndex] : '';
+    const newGtin    = gtinIndex >= 0 ? sanitizeEAN_(info[gtinIndex]) : '';
+
     // string → getal
+    let raw = rawPrice;
     if (typeof raw === 'string') {
       raw = raw.replace(/[^\d,.\-]/g, '').trim();
       if (raw.indexOf(',') > -1 && raw.indexOf('.') > -1) {
@@ -321,6 +331,12 @@ function refreshPricesAndNotify() {
     sh.getRange(row, CONFIG.COL_LAST_PRICE).setValue(newPrice);
     sh.getRange(row, CONFIG.COL_LOWEST_PRICE).setValue(lowest);
     sh.getRange(row, CONFIG.COL_LAST_CHECK).setValue(new Date());
+
+    // GTIN (D) aanvullen of bijwerken voor tab "Concurrenten"
+    const currentGtin = String(gtins[i][0] || '').trim();
+    if (newGtin && newGtin !== currentGtin) {
+      sh.getRange(row, CONFIG.COL_GTIN).setValue(newGtin);
+    }
   }
 
   if (drops.length > 0) {
