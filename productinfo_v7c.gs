@@ -276,10 +276,14 @@ function refreshPricesAndNotify() {
     const row = CONFIG.FIRST_ROW + i;
     const url = urls[i][0];
     const rawWatch = watchs[i][0];
+    const currentGtin = String(gtins[i][0] || '').trim();
 
-    // alleen rijen met URL én watch == TRUE of 'ja'
+    if (!url) continue;
+
+    // alleen rijen met URL én watch == TRUE of 'ja' tellen mee voor prijsalerts
     const watch = (rawWatch === true) || (String(rawWatch).toLowerCase() === 'ja');
-    if (!url || !watch) continue;
+    const needsGtin = !currentGtin;  // vul GTIN ook als er (nog) geen watch staat
+    if (!watch && !needsGtin) continue;
 
     const oldLast  = Number(lastPs[i][0]) || 0;
     const oldPrev  = Number(prevPs[i][0]) || 0;
@@ -313,6 +317,12 @@ function refreshPricesAndNotify() {
       }
     }
     const newPrice = Number(raw);
+    if (!watch && newGtin && newGtin !== currentGtin) {
+      // alleen GTIN bijwerken, verder niets overschrijven
+      sh.getRange(row, CONFIG.COL_GTIN).setValue(newGtin);
+      continue;
+    }
+
     if (!newPrice || isNaN(newPrice)) {
       Logger.log('Geen geldige prijs voor rij ' + row + ': ' + raw);
       continue;
@@ -342,7 +352,6 @@ function refreshPricesAndNotify() {
     sh.getRange(row, CONFIG.COL_LAST_CHECK).setValue(new Date());
 
     // GTIN (D) aanvullen of bijwerken voor tab "Concurrenten"
-    const currentGtin = String(gtins[i][0] || '').trim();
     if (newGtin && newGtin !== currentGtin) {
       sh.getRange(row, CONFIG.COL_GTIN).setValue(newGtin);
     }
