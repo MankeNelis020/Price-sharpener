@@ -106,7 +106,16 @@ function extractEANFromHtml_(html){
   // zichtbare tekst
   const reText=/\b(?:EAN|GTIN(?:\s*1[234])?)\b[^0-9]{0,10}([0-9][0-9\.\-\s]{6,18}[0-9])/gi;
   while((m=reText.exec(html))!==null) candidates.push(m[1]);
-  const cleaned=[...new Set(candidates.map(sanitizeEAN_).filter(Boolean))];
+  // expliciet "barcode" veld uit ruwe JSON/inline definities
+  const reBarcode=/["']barcode["']\s*[:=]\s*["']?([0-9\.\-\s]{8,14})["']?/gi;
+  while((m=reBarcode.exec(html))!==null) candidates.push(m[1]);
+
+  // normaliseer naar cijfers en accepteer GTIN-8/12/13/14
+  const cleaned=[...new Set(
+    candidates
+      .map(v => String(v||"").replace(/\D/g,""))
+      .filter(s => s.length>=8 && s.length<=14)
+  )];
   if(!cleaned.length) return "";
   cleaned.sort((a,b)=>b.length-a.length);
   return cleaned[0];
