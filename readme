@@ -1,2 +1,10 @@
 # price-sharpener
-Dit bestand is nodig om de main branch aan te maken.
+
+Dit project bevat een Google Apps Script (productinfo_v7c.gs) dat productinformatie uit webshops ophaalt en een simpele prijsbewaker in een Google Spreadsheet bijwerkt. Het script gebruikt `PRODUCTINFO` en `PRODUCTFIELD` om productdata (titel, merk, prijs, GTIN/EAN, enz.) uit HTML/JSON-LD te extraheren, en de functie `refreshPricesAndNotify` om prijzen voor gemarkeerde rijen te verversen en per e-mail te waarschuwen bij prijsdalingen.
+
+Belangrijkste verbeteringen t.o.v. eerdere versies:
+- JSON-LD-blokken worden eerst gedecodeerd van HTML-entiteiten en kunnen ook meerdere aaneengeschreven objecten bevatten.
+- `decodeHtml_` kent extra entiteiten zoals `&euro;`, zodat beschrijvingen en prijzen netjes worden ingelezen.
+- Arrays uit JSON-LD (bijv. bij `image` of `brand`) pakken automatisch het eerste element in plaats van een hele array terug te geven.
+
+Kopieer de inhoud van `productinfo_v7c.gs` naar de Apps Script-editor van je sheet. Pas in `CONFIG` het tabblad, je e-mailadres en eventuele kolomnummers aan je eigen sheet aan. Daarna kun je via het menu “🛒 Babytools → Prijzen verversen” de data ophalen en alerts per mail ontvangen.
