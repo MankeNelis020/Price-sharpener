@@ -46,6 +46,14 @@ const WHITELIST = [
 
 
 /***** ENTRYPOINT *****/
+// Voeg een menu-item toe om concurrenten te checken vanuit Sheets
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('Price sharpener')
+    .addItem('Concurrenten afzoeken', 'prijsAgentConcurrenten')
+    .addToUi();
+}
+
 // Meervoudige zoekopties per product (naam + optioneel GTIN)
 function prijsAgentConcurrenten() {
   if (!SERPAPI_KEY) throw new Error('SERPAPI_API_KEY ontbreekt (Project Settings → Script properties).');
