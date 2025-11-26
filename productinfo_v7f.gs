@@ -1,7 +1,7 @@
-/** PRODUCTINFO & PRODUCTFIELD — v7e (decode HTML entities + robust EAN + MPN fallback) **/
+/** PRODUCTINFO & PRODUCTFIELD — v7f (decode HTML entities + robust EAN + MPN fallback) **/
 
 /* -------- Patches -------- */
-const CACHE_VER      = "v7e";    // bump cache to refresh
+const CACHE_VER      = "v7f";    // bump cache to refresh
 const MAX_DESC       = 1200;
 const MAX_TITLE      = 300;
 const SAFE_CELL_MAX  = 49000;
@@ -204,13 +204,17 @@ function extractProductData_(html, url){
               || extractMPNFromHtml_(html);
 
   // --- ROBUST GTIN/EAN ---
-  out.gtin = sanitizeEAN_(firstNonEmpty_([
-    getDeep_(productNode,"gtin8"),
+  const gtinFromNodes = sanitizeEAN_(firstNonEmpty_([
+    findFieldInNodes_(flat, ["gtin13","gtin","gtin14","gtin12","gtin8","ean"]),
     getDeep_(productNode,"gtin13"),
     getDeep_(productNode,"gtin14"),
     getDeep_(productNode,"gtin12"),
-    getDeep_(productNode,"gtin"),
-    meta["gtin"], meta["gtin8"], meta["gtin13"], meta["gtin14"], meta["gtin12"],
+    getDeep_(productNode,"gtin8"),
+    getDeep_(productNode,"gtin")
+  ]));
+
+  out.gtin = gtinFromNodes || sanitizeEAN_(firstNonEmpty_([
+    meta["gtin"], meta["gtin13"], meta["gtin14"], meta["gtin12"], meta["gtin8"],
     meta["ean"], meta["ean13"], meta["ean-13"],
     og["product:ean"]
   ])) || sanitizeEAN_(extractEANFromHtml_(html)); // <-- html i.p.v. doc
