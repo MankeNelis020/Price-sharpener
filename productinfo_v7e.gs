@@ -1,7 +1,7 @@
-/** PRODUCTINFO & PRODUCTFIELD — v7d (decode HTML entities + robust EAN + MPN fallback) **/
+/** PRODUCTINFO & PRODUCTFIELD — v7e (decode HTML entities + robust EAN + MPN fallback) **/
 
 /* -------- Patches -------- */
-const CACHE_VER      = "v7d";    // bump cache to refresh
+const CACHE_VER      = "v7e";    // bump cache to refresh
 const MAX_DESC       = 1200;
 const MAX_TITLE      = 300;
 const SAFE_CELL_MAX  = 49000;
@@ -160,7 +160,7 @@ function extractProductData_(html, url){
   const doc=normalizeHtml_(html);
   const domain=getHostname_(url);
 
-  let productNode=null, offerNode=null, ratingNode=null;
+  let productNode=null, productGroupNode=null, offerNode=null, ratingNode=null;
 
   // PATCH: JSON-LD uit ruwe html
   const jsonldRegex=/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
@@ -171,23 +171,36 @@ function extractProductData_(html, url){
 
   const flat=flattenNodes_(nodes);
   productNode = flat.find(n=>typeIncludes_(n,"Product")) || null;
-  offerNode   = flat.find(n=>typeIncludes_(n,"Offer"))   || (productNode && pickOffer_(productNode)) || null;
-  ratingNode  = flat.find(n=>typeIncludes_(n,"AggregateRating")) || (productNode && productNode.aggregateRating) || null;
+  productGroupNode = flat.find(n=>typeIncludes_(n,"ProductGroup")) || null;
+  offerNode   = flat.find(n=>typeIncludes_(n,"Offer"))
+              || (productNode && pickOffer_(productNode))
+              || (productGroupNode && pickOffer_(productGroupNode))
+              || null;
+  ratingNode  = flat.find(n=>typeIncludes_(n,"AggregateRating"))
+              || (productNode && productNode.aggregateRating)
+              || (productGroupNode && productGroupNode.aggregateRating)
+              || null;
+
+  const primaryProduct = productNode || productGroupNode;
 
   const og   = extractOG_(doc);
   const meta = extractMetaItemprops_(doc);
 
   const out={};
   out.title = clamp_(firstNonEmpty_([
-    getDeep_(productNode,"name"), og["og:title"], meta["title"], extractH1_(doc), extractTitleTag_(doc)
+    getDeep_(primaryProduct,"name"), og["og:title"], meta["title"], extractH1_(doc), extractTitleTag_(doc)
   ]), MAX_TITLE);
 
-  const brandObj=getDeep_(productNode,"brand");
+  const brandObj=getDeep_(primaryProduct,"brand");
   out.brand = firstNonEmpty_([ brandObj && (brandObj.name||brandObj.brand||brandObj), og["product:brand"], meta["brand"] ]);
-  out.model = firstNonEmpty_([ getDeep_(productNode,"model"), getDeep_(productNode,"mpn"), meta["model"] ]);
-  out.color = firstNonEmpty_([ getDeep_(productNode,"color"), meta["color"] ]);
-  out.sku   = firstNonEmpty_([ getDeep_(productNode,"sku"),  meta["sku"] ]);
-  out.mpn   = sanitizeMPN_(firstNonEmpty_([ getDeep_(productNode,"mpn"), meta["mpn"], og["product:mpn"] ]))
+  out.model = firstNonEmpty_([ getDeep_(primaryProduct,"model"), getDeep_(primaryProduct,"mpn"), meta["model"] ]);
+  out.color = firstNonEmpty_([ getDeep_(primaryProduct,"color"), meta["color"] ]);
+  out.sku   = firstNonEmpty_([ getDeep_(primaryProduct,"sku"), findFieldInNodes_(flat,"sku"), meta["sku"] ]);
+  out.mpn   = sanitizeMPN_(firstNonEmpty_([
+                getDeep_(primaryProduct,"mpn"),
+                findFieldInNodes_(flat,"mpn"),
+                meta["mpn"], og["product:mpn"]
+              ]))
               || extractMPNFromHtml_(html);
 
   // --- ROBUST GTIN/EAN ---
@@ -236,6 +249,18 @@ function extractH1_(html){ const m=html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i); ret
 function typeIncludes_(node,typeName){ if(!node||!node["@type"])return false; const t=node["@type"]; return (Array.isArray(t)?t:[t]).some(x=>String(x).toLowerCase()===String(typeName).toLowerCase()); }
 function pickOffer_(product){ const offers=product&&product.offers; if(!offers) return null; if(Array.isArray(offers)) return offers.find(o=>o.price)||offers[0]; return offers; }
 function flattenNodes_(x){ const out=[];(function walk(n){ if(!n||typeof n!=="object")return; out.push(n); Object.keys(n).forEach(k=>{ const v=n[k]; if(v&&typeof v==="object"){ if(Array.isArray(v)) v.forEach(walk); else walk(v);} });})(x); return out; }
+function findFieldInNodes_(nodes, keys){
+  if(!Array.isArray(nodes)) return "";
+  const keyArr=Array.isArray(keys)?keys:[keys];
+  for(const n of nodes){
+    if(!n || typeof n!=="object") continue;
+    for(const k of keyArr){
+      const val=getDeep_(n,k);
+      if(val!==undefined && String(val).trim()) return val;
+    }
+  }
+  return "";
+}
 function extractOG_(html){ const out={}; const re=/<meta\s+(?:property|name)=["']([^"']+)["']\s+content=["']([^"']*)["'][^>]*>/gi; let m; while((m=re.exec(html))!==null) out[m[1].toLowerCase()]=m[2]; return out; }
 function extractMetaItemprops_(html){ const out={}; const re=/<meta\s+itemprop=["']([^"']+)["']\s+content=["']([^"']*)["'][^>]*>/gi; let m; while((m=re.exec(html))!==null) out[m[1].toLowerCase()]=m[2]; return out; }
 function extractCanonical_(html){ const m=html.match(/<link[^>]+rel=["']canonical["'][^>]+href=["']([^"']+)["']/i); return m?m[1]:""; }
