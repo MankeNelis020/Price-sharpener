@@ -96,12 +96,12 @@ function sanitizeEAN_(s){
 function extractEANFromHtml_(html){
   if(!html) return "";
   const candidates=[];
-  // itemprop/meta/og varianten
-  const reItemprop=/<(?:meta|span|div)[^>]+(?:itemprop|property|name)=["'](?:gtin|gtin13|gtin14|gtin12|ean|ean13|product:ean)["'][^>]+?(?:content|value)?=["']?([0-9\.\-\s]{8,20})["']?/gi;
+  // itemprop/meta/og varianten (incl. GTIN-8)
+  const reItemprop=/<(?:meta|span|div)[^>]+(?:itemprop|property|name)=["'](?:gtin|gtin8|gtin13|gtin14|gtin12|ean|ean13|product:ean)["'][^>]+?(?:content|value)?=["']?([0-9\.\-\s]{8,20})["']?/gi;
   let m;
   while((m=reItemprop.exec(html))!==null) candidates.push(m[1]);
   // data- attributen
-  const reData=/data-(?:ean|gtin|gtin13|gtin14)\s*=\s*["']([0-9\.\-\s]{8,20})["']/gi;
+  const reData=/data-(?:ean|gtin|gtin8|gtin13|gtin14)\s*=\s*["']([0-9\.\-\s]{8,20})["']/gi;
   while((m=reData.exec(html))!==null) candidates.push(m[1]);
   // zichtbare tekst
   const reText=/\b(?:EAN|GTIN(?:\s*1[234])?)\b[^0-9]{0,10}([0-9][0-9\.\-\s]{6,18}[0-9])/gi;
@@ -157,11 +157,12 @@ function extractProductData_(html, url){
 
   // --- ROBUST GTIN/EAN ---
   out.gtin = sanitizeEAN_(firstNonEmpty_([
+    getDeep_(productNode,"gtin8"),
     getDeep_(productNode,"gtin13"),
     getDeep_(productNode,"gtin14"),
     getDeep_(productNode,"gtin12"),
     getDeep_(productNode,"gtin"),
-    meta["gtin"], meta["gtin13"], meta["gtin14"], meta["gtin12"],
+    meta["gtin"], meta["gtin8"], meta["gtin13"], meta["gtin14"], meta["gtin12"],
     meta["ean"], meta["ean13"], meta["ean-13"],
     og["product:ean"]
   ])) || sanitizeEAN_(extractEANFromHtml_(html)); // <-- html i.p.v. doc
