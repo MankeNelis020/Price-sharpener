@@ -46,6 +46,7 @@ const WHITELIST = [
 
 
 /***** ENTRYPOINT *****/
+// Meervoudige zoekopties per product (naam + optioneel GTIN)
 function prijsAgentConcurrenten() {
   if (!SERPAPI_KEY) throw new Error('SERPAPI_API_KEY ontbreekt (Project Settings → Script properties).');
 
@@ -53,7 +54,7 @@ function prijsAgentConcurrenten() {
   const input = ss.getSheetByName(SHEET_INPUT);
   if (!input) throw new Error(`Tabblad ${SHEET_INPUT} ontbreekt.`);
 
-  const queries = readQueries_(input);          // [{row, query}]
+  const queries = readQueries_(input);          // [{row, query, searchTerms}]
   if (!queries.length) return;
 
   const history = ensureSheet_(ss, SHEET_HISTORY, [
@@ -70,9 +71,9 @@ function prijsAgentConcurrenten() {
   const appendRows = [];   // voor Prijshistorie
   const snapshotRows = []; // voor Concurrenten (we schrijven daarna in bulk)
 
-  for (const {query} of queries) {
-    // 1) haal kandidaten op
-    const items = searchGoogleShopping_(query);
+  for (const {query, searchTerms} of queries) {
+    // 1) haal kandidaten op (hoofdvraag + optionele GTIN)
+    const items = uniqueByLink_(searchTerms.flatMap(term => searchGoogleShopping_(term)));
 
     // 2) whitelist-filter
     const allowed = items.filter(it => isWhitelisted_(it.store));
@@ -132,14 +133,20 @@ function prijsAgentConcurrenten() {
 
 /***** Helpers *****/
 function readQueries_(sheet) {
-  // leest C2:C (stop bij lege rij)
-  const col = 3; // C
-  const rows = sheet.getRange(2, col, Math.max(1, sheet.getLastRow() - 1), 1).getValues();
+  // leest C2:C (zoekterm) + optioneel D2:D (GTIN); stopt bij lege rij in beide kolommen
+  const startCol = 3; // C
+  const rows = sheet.getRange(2, startCol, Math.max(1, sheet.getLastRow() - 1), 2).getValues();
   const out = [];
   for (let i = 0; i < rows.length; i++) {
-    const q = String(rows[i][0] || '').trim();
-    if (!q) continue;
-    out.push({ row: 2 + i, query: q });
+    const query = String(rows[i][0] || '').trim();
+    const gtin  = String(rows[i][1] || '').trim();
+    if (!query && !gtin) continue;
+
+    const searchTerms = [];
+    if (query) searchTerms.push(query);
+    if (gtin)  searchTerms.push(gtin);
+
+    out.push({ row: 2 + i, query: query || gtin, searchTerms });
   }
   return out;
 }
@@ -203,6 +210,17 @@ function buildHistoryIndex_(historySheet) {
     idx.set(key, rec);
   }
   return idx;
+}
+
+// dedupliceer resultaten per unieke link (handig bij meerdere zoektermen/GTIN)
+function uniqueByLink_(items) {
+  const seen = new Set();
+  return items.filter(it => {
+    const key = it.link;
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 /***** SerpAPI wrapper (PATCH: store-fallback + logging) *****/
