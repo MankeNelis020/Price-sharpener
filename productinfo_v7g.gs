@@ -1,7 +1,7 @@
-/** PRODUCTINFO & PRODUCTFIELD — v7f (decode HTML entities + robust EAN + MPN fallback) **/
+/** PRODUCTINFO & PRODUCTFIELD — v7g (decode HTML entities + robust EAN + MPN fallback) **/
 
 /* -------- Patches -------- */
-const CACHE_VER      = "v7f";    // bump cache to refresh
+const CACHE_VER      = "v7g";    // bump cache to refresh
 const MAX_DESC       = 1200;
 const MAX_TITLE      = 300;
 const SAFE_CELL_MAX  = 49000;
@@ -341,14 +341,14 @@ function refreshPricesAndNotify() {
     const row = CONFIG.FIRST_ROW + i;
     const url = urls[i][0];
     const rawWatch = watchs[i][0];
-    const currentGtin = String(gtins[i][0] || '').trim();
+    const currentIdentifier = String(gtins[i][0] || '').trim();
 
     if (!url) continue;
 
     // alleen rijen met URL én watch == TRUE of 'ja' tellen mee voor prijsalerts
     const watch = (rawWatch === true) || (String(rawWatch).toLowerCase() === 'ja');
-    const needsGtin = !currentGtin;  // vul GTIN ook als er (nog) geen watch staat
-    if (!watch && !needsGtin) continue;
+    const needsIdentifier = !currentIdentifier;  // vul identifier ook als er (nog) geen watch staat
+    if (!watch && !needsIdentifier) continue;
 
     const oldLast  = Number(lastPs[i][0]) || 0;
     const oldPrev  = Number(prevPs[i][0]) || 0;
@@ -368,8 +368,21 @@ function refreshPricesAndNotify() {
 
     const priceIndex = PRODUCTINFO_HEADERS.indexOf('price');
     const gtinIndex  = PRODUCTINFO_HEADERS.indexOf('gtin');
+    const mpnIndex   = PRODUCTINFO_HEADERS.indexOf('mpn');
+    const skuIndex   = PRODUCTINFO_HEADERS.indexOf('sku');
+
     const rawPrice   = priceIndex >= 0 ? info[priceIndex] : '';
     const newGtin    = gtinIndex >= 0 ? sanitizeEAN_(info[gtinIndex]) : '';
+    const newMpn     = mpnIndex  >= 0 ? sanitizeMPN_(info[mpnIndex])  : '';
+    const newSku     = skuIndex  >= 0 ? sanitizeMPN_(info[skuIndex])  : '';
+    const identifier = newGtin || newMpn || newSku;
+
+    if (!watch) {
+      if (identifier && identifier !== currentIdentifier) {
+        sh.getRange(row, CONFIG.COL_GTIN).setValue(identifier);
+      }
+      continue;
+    }
 
     // string → getal
     let raw = rawPrice;
@@ -382,11 +395,6 @@ function refreshPricesAndNotify() {
       }
     }
     const newPrice = Number(raw);
-    if (!watch && newGtin && newGtin !== currentGtin) {
-      // alleen GTIN bijwerken, verder niets overschrijven
-      sh.getRange(row, CONFIG.COL_GTIN).setValue(newGtin);
-      continue;
-    }
 
     if (!newPrice || isNaN(newPrice)) {
       Logger.log('Geen geldige prijs voor rij ' + row + ': ' + raw);
@@ -416,9 +424,9 @@ function refreshPricesAndNotify() {
     sh.getRange(row, CONFIG.COL_LOWEST_PRICE).setValue(lowest);
     sh.getRange(row, CONFIG.COL_LAST_CHECK).setValue(new Date());
 
-    // GTIN (D) aanvullen of bijwerken voor tab "Concurrenten"
-    if (newGtin && newGtin !== currentGtin) {
-      sh.getRange(row, CONFIG.COL_GTIN).setValue(newGtin);
+    // GTIN/MPN/SKU (D) aanvullen of bijwerken voor tab "Concurrenten"
+    if (identifier && identifier !== currentIdentifier) {
+      sh.getRange(row, CONFIG.COL_GTIN).setValue(identifier);
     }
   }
 

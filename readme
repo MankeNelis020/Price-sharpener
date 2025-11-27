@@ -1,6 +1,6 @@
 # price-sharpener
 
-Dit project bevat een Google Apps Script (productinfo_v7f.gs) dat productinformatie uit webshops ophaalt en een simpele prijsbewaker in een Google Spreadsheet bijwerkt. Het script gebruikt `PRODUCTINFO` en `PRODUCTFIELD` om productdata (titel, merk, prijs, GTIN/EAN, MPN, enz.) uit HTML/JSON-LD te extraheren, en de functie `refreshPricesAndNotify` om prijzen voor gemarkeerde rijen te verversen en per e-mail te waarschuwen bij prijsdalingen.
+Dit project bevat een Google Apps Script (productinfo_v7g.gs) dat productinformatie uit webshops ophaalt en een simpele prijsbewaker in een Google Spreadsheet bijwerkt. Het script gebruikt `PRODUCTINFO` en `PRODUCTFIELD` om productdata (titel, merk, prijs, GTIN/EAN, MPN, enz.) uit HTML/JSON-LD te extraheren, en de functie `refreshPricesAndNotify` om prijzen voor gemarkeerde rijen te verversen en per e-mail te waarschuwen bij prijsdalingen.
 
 Belangrijkste verbeteringen t.o.v. eerdere versies:
 - JSON-LD-blokken worden eerst gedecodeerd van HTML-entiteiten en kunnen ook meerdere aaneengeschreven objecten bevatten.
@@ -10,4 +10,6 @@ Belangrijkste verbeteringen t.o.v. eerdere versies:
 - MPN wordt, naast JSON-LD en meta-tag velden, ook opgepikt uit data-attributen, inline JSON en zichtbare “MPN” labels als fallback.
 - ProductGroup-blokken uit JSON-LD (zoals op bugaboo.com) worden meegenomen, zodat MPN/sku uit zowel de hoofddefinitie als varianten wordt opgepikt.
 
-Kopieer de inhoud van `productinfo_v7f.gs` naar de Apps Script-editor van je sheet. Pas in `CONFIG` het tabblad, je e-mailadres en eventuele kolomnummers aan je eigen sheet aan (GTIN staat standaard op kolom D zodat tab “Concurrenten” die waarde kan hergebruiken). De functie vult GTIN nu automatisch per URL in kolom D—even wanneer de rij niet gemarkeerd staat voor prijsbewaking—zodra er een GTIN/EAN gevonden wordt, en vult ook een opgespoorde MPN in het productresultaat.
+Kolom D wordt nu automatisch gevuld met de beste gevonden identifier (voorkeur: GTIN/EAN, anders MPN, anders SKU) voor elke URL zodra de functie draait—óók wanneer een rij alleen voor GTIN moet worden ingevuld en niet is gemarkeerd voor prijsbewaking. De prijsupdate in kolommen G/H/I loopt daar parallel aan voor rijen met “Watch”.
+
+Kopieer de inhoud van `productinfo_v7g.gs` naar de Apps Script-editor van je sheet. Pas in `CONFIG` het tabblad, je e-mailadres en eventuele kolomnummers aan je eigen sheet aan (GTIN staat standaard op kolom D zodat tab “Concurrenten” die waarde kan hergebruiken). De functie vult de beste identifier (GTIN/EAN → MPN → SKU) automatisch per URL in kolom D—ook als de rij niet gemarkeerd staat voor prijsbewaking—en werkt prijzen bij voor rijen met een “Watch”.
