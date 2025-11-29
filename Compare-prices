@@ -401,6 +401,7 @@ function discoverCompetitorsForProduct_(mainProduct) {
     if (code !== 200) return;
 
     const html = resp.getContentText();
+    Logger.log('HTML SNIPPET FOR [' + key + ']: ' + html.substring(0, 5000));
     const candidates = extractProductUrlsFromSearch_(key, html, shop) || [];
     Logger.log('DISCOVER [' + key + '] candidates count=' + candidates.length);
     candidates.forEach(function (rawUrl) {
@@ -470,69 +471,98 @@ function chooseSearchQuery_(mainProduct) {
  * @return {Array<string>} A list of absolute product URLs.
  */
 function extractProductUrlsFromSearch_(shopKey, html, shop) {
-  const domain = shop.domain;
-  const baseUrl = shop.baseUrl || 'https://www.' + domain;
-  const candidates = new Set();
-  let rawHrefCount = 0;
-  let filteredPathCount = 0;
-  let parseFailCount = 0;
+  if (!html || !shop || !shop.domain) {
+    Logger.log('EXTRACT [' + shopKey + '] missing html or domain');
+    return [];
+  }
 
-  // 1. Define Shop-Specific Patterns (Targeted Extraction)
-  // Targeting the 'product-item-link' class common in these Magento-based shops.
-  const shopPatterns = {
-    babydump: /<a\s+[^>]*?class=["'][^"']*product-item-link[^"']*["'][^>]*?href=["']([^"']+)["']/gi,
-    prenatal: /<a\s+[^>]*?class=["'][^"']*product-item-link[^"']*["'][^>]*?href=["']([^"']+)["']/gi,
-    babyentiener: /<a\s+[^>]*?class=["'][^"']*product-item-link[^"']*["'][^>]*?href=["']([^"']+)["']/gi,
-    babyplanet: /<a\s+[^>]*?class=["'][^"']*product-item-link[^"']*["'][^>]*?href=["']([^"']+)["']/gi,
-    vanasten: /<a\s+[^>]*?class=["'][^"']*product-item-link[^"']*["'][^>]*?href=["']([^"']+)["']/gi,
-    // Mamaloes (Needs a generic link check due to unknown specific structure)
-    mamaloes: /<a\s+[^>]*?href=["'](\/[^'"]*?product[^'"]*)["']/gi
+  var domain = shop.domain.replace(/^www\./, '').toLowerCase();
+  var baseUrl = shop.baseUrl || 'https://' + domain;
+  var candidates = new Set();
+  var rawHrefCount = 0;
+  var filteredPathCount = 0;
+  var parseFailCount = 0;
+  var containerMatched = false;
+  var MAX_CANDIDATES = 10;
+
+  function domainMatches(host) {
+    var cleanHost = String(host || '').replace(/^www\./, '').toLowerCase();
+    return cleanHost.indexOf(domain) !== -1;
+  }
+
+  function addCandidate(rawHref) {
+    if (!rawHref || candidates.size >= MAX_CANDIDATES) return;
+    var abs = toAbsoluteUrl(rawHref, baseUrl);
+    if (!abs) return;
+    try {
+      var parsed = new URL(abs);
+      if (!domainMatches(parsed.hostname)) return;
+      if (isNonProductPath(parsed.pathname)) {
+        filteredPathCount++;
+        return;
+      }
+      if (!isValidProductPath(parsed.pathname || abs)) {
+        parseFailCount++;
+        return;
+      }
+      candidates.add(abs);
+    } catch (e) {
+      parseFailCount++;
+    }
+  }
+
+  var containerPatterns = {
+    babydump: /<(?:ol|ul)[^>]*class=["'][^"']*(products|product-items|product-grid)[^"']*["'][^>]*>([\s\S]*?)<\/(?:ol|ul)>/i,
+    prenatal: /<(?:ol|ul)[^>]*class=["'][^"']*(products|product-items|product-grid)[^"']*["'][^>]*>([\s\S]*?)<\/(?:ol|ul)>/i,
+    babyentiener: /<(?:ol|ul)[^>]*class=["'][^"']*(products|product-items|product-grid)[^"']*["'][^>]*>([\s\S]*?)<\/(?:ol|ul)>/i,
+    babyplanet: /<(?:ol|ul)[^>]*class=["'][^"']*(products|product-items|product-grid)[^"']*["'][^>]*>([\s\S]*?)<\/(?:ol|ul)>/i,
+    vanasten: /<(?:ol|ul)[^>]*class=["'][^"']*(products|product-items|product-grid)[^"']*["'][^>]*>([\s\S]*?)<\/(?:ol|ul)>/i,
+    mamaloes: /<(?:ol|ul)[^>]*class=["'][^"']*(products|product-items|product-grid)[^"']*["'][^>]*>([\s\S]*?)<\/(?:ol|ul)>/i
   };
 
-  // 2. Perform Targeted Extraction using the specific pattern
-  const specificRe = shopPatterns[shopKey];
-  if (specificRe) {
-    let match;
-    while ((match = specificRe.exec(html)) !== null) {
-      const path = match[1];
-      if (isValidProductPath(path)) {
-        candidates.add(toAbsoluteUrl(path, baseUrl));
-      } else {
-        filteredPathCount++;
-      }
+  var linkPatterns = {
+    babydump: /<a[^>]+class=["'][^"']*(product-item-link|product-item-photo|product-item-name)[^"']*["'][^>]*href=["']([^"']+)["']/gi,
+    prenatal: /<a[^>]+class=["'][^"']*(product-item-link|product-item-photo|product-item-name)[^"']*["'][^>]*href=["']([^"']+)["']/gi,
+    babyentiener: /<a[^>]+class=["'][^"']*(product-item-link|product-item-photo|product-item-name)[^"']*["'][^>]*href=["']([^"']+)["']/gi,
+    babyplanet: /<a[^>]+class=["'][^"']*(product-item-link|product-item-photo|product-item-name)[^"']*["'][^>]*href=["']([^"']+)["']/gi,
+    vanasten: /<a[^>]+class=["'][^"']*(product-item-link|product-item-photo|product-item-name)[^"']*["'][^>]*href=["']([^"']+)["']/gi,
+    mamaloes: /<a[^>]+href=["']([^"']+)["'][^>]*class=["'][^"']*(product|product-item|product-card)[^"']*["'][^>]*>/gi
+  };
+
+  var searchHtml = html;
+  var containerRe = containerPatterns[shopKey];
+  if (containerRe) {
+    var containerMatch = containerRe.exec(html);
+    if (containerMatch && containerMatch[2]) {
+      searchHtml = containerMatch[2];
+      containerMatched = true;
     }
   }
 
-  // Fallback if specific pattern yielded no results
+  var linkRe = linkPatterns[shopKey];
+  if (linkRe) {
+    var lm;
+    while ((lm = linkRe.exec(searchHtml)) !== null) {
+      addCandidate(lm[2] || lm[1]);
+      if (candidates.size >= MAX_CANDIDATES) break;
+    }
+  }
+
   if (candidates.size === 0) {
     Logger.log('EXTRACT [' + shopKey + '] no shop-pattern hits, using generic anchor sweep');
-    // 3. Generic Anchor Sweep (Original logic fallback)
-    const anchorRe = /<a\b[^>]*?href=["']([^"']+)["'][^>]*?>/gi;
-    let match;
-    while ((match = anchorRe.exec(html)) !== null) {
-      const path = match[1];
+    var anchorRe = /<a\b[^>]*?href=["']([^"']+)["'][^>]*?>/gi;
+    var am;
+    while ((am = anchorRe.exec(searchHtml)) !== null) {
       rawHrefCount++;
-
-      // Filter non-product links
-      if (isNonProductPath(path)) {
-        filteredPathCount++;
-        continue;
-      }
-      
-      if (isValidProductPath(path)) {
-         candidates.add(toAbsoluteUrl(path, baseUrl));
-      } else {
-        parseFailCount++;
-      }
+      addCandidate(am[1]);
+      if (candidates.size >= MAX_CANDIDATES) break;
     }
   }
 
-  // 4. Final logging
-  Logger.log('EXTRACT [' + shopKey + '] domain=' + domain + ' → ' + candidates.size + 
-             ' product candidates (raw hrefs=' + rawHrefCount + 
-             ', hostMismatch=0, filteredPath=' + filteredPathCount + 
-             ', parseFail=' + parseFailCount + 
-             ', added=' + candidates.size + ')');
+  Logger.log(
+    'EXTRACT [' + shopKey + '] domain=' + domain + ' → ' + candidates.size +
+    ' product candidates (containerMatched=' + containerMatched + ', raw hrefs=' + rawHrefCount +
+    ', filteredPath=' + filteredPathCount + ', parseFail=' + parseFailCount + ')' );
 
   return Array.from(candidates);
 }
