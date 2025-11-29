@@ -59,7 +59,7 @@ function onOpen() {
 
 // Sheetnamen voor bestaande en nieuwe functionaliteit
 const SHEETS = {
-  OVERZICHT: 'Overzicht',
+  OVERZICHT: 'Blad1',
   PRIJZEN: 'Prijzen',
   SCRAPE_LOG: 'ScrapeLog',
   CONCURRENT2: 'Concurrenten-2'
@@ -346,11 +346,11 @@ function headerMap_(headers) {
   return map;
 }
 
-// Ontdekt concurrenten voor alle producten in 'Overzicht' en vult "Concurrenten-2"
+// Ontdekt concurrenten voor alle producten in het overzichtsblad en vult "Concurrenten-2"
 function discoverCompetitorsForAllProducts() {
   const ss = SpreadsheetApp.getActive();
   const overview = ss.getSheetByName(SHEETS.OVERZICHT);
-  if (!overview) throw new Error('Tabblad Overzicht ontbreekt.');
+  if (!overview) throw new Error('Tabblad ' + SHEETS.OVERZICHT + ' ontbreekt.');
 
   const lastRow = overview.getLastRow();
   if (lastRow < 2) return;
@@ -359,9 +359,9 @@ function discoverCompetitorsForAllProducts() {
   const map = headerMap_(headers);
   const idxProductId = map['productid'];
   const idxProduct = map['product'];
-  const idxMainUrl = map['url 1'];
+  const idxMainUrl = map['url 1'] != null ? map['url 1'] : map['url'];
   if (idxProductId == null || idxProduct == null) {
-    throw new Error('Kolommen "ProductId" en "Product" zijn vereist in Overzicht.');
+    throw new Error('Kolommen "ProductId" en "Product" zijn vereist in ' + SHEETS.OVERZICHT + '.');
   }
 
   const data = overview.getRange(2, 1, lastRow - 1, headers.length).getValues();
@@ -658,7 +658,7 @@ function findMainProductById_(productId) {
   var map = headerMap_(headers);
   var idxId = map['productid'];
   var idxName = map['product'];
-  var idxUrl = map['url 1'];
+  var idxUrl = map['url 1'] != null ? map['url 1'] : map['url'];
   if (idxId == null) return null;
   var data = overview.getRange(2, 1, last - 1, headers.length).getValues();
   for (var i = 0; i < data.length; i++) {
