@@ -386,7 +386,13 @@ function discoverCompetitorsForProduct_(mainProduct) {
     if (!shop || !shop.searchTemplate) return;
 
     const searchUrl = shop.searchTemplate.replace('{QUERY}', encodeURIComponent(query));
-    const resp = UrlFetchApp.fetch(searchUrl, { muteHttpExceptions: true, followRedirects: true });
+    var resp;
+    try {
+      resp = UrlFetchApp.fetch(searchUrl, { muteHttpExceptions: true, followRedirects: true });
+    } catch (e) {
+      Logger.log('DISCOVER fetch error [' + key + '] ' + e);
+      return;
+    }
     Utilities.sleep(300);
     if (resp.getResponseCode() !== 200) return;
 
@@ -405,6 +411,7 @@ function discoverCompetitorsForProduct_(mainProduct) {
         const currentUrl = rowInfo.values[3];
         if (currentUrl !== normalized) {
           sh.getRange(rowInfo.row, 4).setValue(normalized);
+          existing.set(indexKey, { row: rowInfo.row, values: [rowInfo.values[0], rowInfo.values[1], rowInfo.values[2], normalized, rowInfo.values[4], rowInfo.values[5]] });
         }
       } else {
         sh.appendRow([
@@ -415,6 +422,8 @@ function discoverCompetitorsForProduct_(mainProduct) {
           '',
           ''
         ]);
+        const newRow = sh.getLastRow();
+        existing.set(indexKey, { row: newRow, values: [mainProduct.productId, mainProduct.name, shop.displayName, normalized, '', ''] });
       }
     });
   });
@@ -442,23 +451,61 @@ function chooseSearchQuery_(mainProduct) {
   return '';
 }
 
-// Haalt mogelijke product-URLs uit een zoekresultaat-HTML
+// Haalt mogelijke product-URLs uit een zoekresultaat-HTML (shop-specifiek, max 5)
 function extractProductUrlsFromSearch_(shopKey, html, shopConfig) {
   var urls = [];
-  var domain = shopConfig && shopConfig.domain ? shopConfig.domain.replace(/\./g, '\\.') : '';
-  if (domain) {
-    var re = new RegExp('href="([^"]*' + domain + '[^"]*)"', 'gi');
+  var added = {};
+  var domain = (shopConfig && shopConfig.domain) ? shopConfig.domain : '';
+
+  function addUrl_(href) {
+    if (!href || urls.length >= 5) return;
+    var normalized = normalizeCandidateUrl_(href, shopConfig);
+    if (!normalized || isBlacklistedDomain_(normalized)) return;
+    if (!isProbableProductPath_(normalized)) return;
+    if (added[normalized]) return;
+    added[normalized] = true;
+    urls.push(normalized);
+  }
+
+  function collectFromRegex_(re) {
     var m;
-    while ((m = re.exec(html)) !== null) {
-      urls.push(m[1]);
-      if (urls.length >= 5) break;
+    while ((m = re.exec(html)) !== null && urls.length < 5) {
+      addUrl_(m[1]);
     }
   }
-  // fallback voor relatieve links
-  if (!urls.length) {
-    var relMatch = html.match(/href="(\/[^"#?]+)"/i);
-    if (relMatch) urls.push(relMatch[1]);
+
+  switch (shopKey) {
+    case 'babydump':
+      collectFromRegex_(/<a[^>]+class="[^"]*(?:product|card)[^"]*"[^>]+href="([^"]+)"/gi);
+      collectFromRegex_(/<a[^>]+href="([^"]+)"[^>]+data-product-id/gi);
+      break;
+    case 'prenatal':
+      collectFromRegex_(/<a[^>]+class="[^"]*(?:product|product-item|product__image)[^"]*"[^>]+href="([^"]+)"/gi);
+      collectFromRegex_(/<a[^>]+href="([^"]+)"[^>]+data-product-id/gi);
+      break;
+    case 'babyentiener':
+      collectFromRegex_(/<a[^>]+class="[^"]*(?:product|product-item|product-grid-item)[^"]*"[^>]+href="([^"]+)"/gi);
+      collectFromRegex_(/<a[^>]+href="([^"]+)"[^>]+data-product-id/gi);
+      break;
+    case 'babyplanet':
+      collectFromRegex_(/<a[^>]+class="[^"]*(?:product|product-item|product-image)[^"]*"[^>]+href="([^"]+)"/gi);
+      collectFromRegex_(/<a[^>]+href="([^"]+)"[^>]+data-product-id/gi);
+      break;
+    case 'mamaloes':
+      collectFromRegex_(/<a[^>]+class="[^"]*(?:product|product-item|product-thumb|product-grid-product)[^"]*"[^>]+href="([^"]+)"/gi);
+      collectFromRegex_(/<a[^>]+href="([^"]+)"[^>]+data-product-id/gi);
+      break;
+    case 'vanasten':
+      collectFromRegex_(/<a[^>]+class="[^"]*(?:product|product-item|product-image)[^"]*"[^>]+href="([^"]+)"/gi);
+      collectFromRegex_(/<a[^>]+href="([^"]+)"[^>]+data-product-id/gi);
+      break;
+    default:
+      if (domain) {
+        collectFromRegex_(new RegExp('href="([^"]*' + domain.replace(/\./g, '\\.') + '[^"]*)"', 'gi'));
+      }
   }
+
+  Logger.log('EXTRACT [' + shopKey + '] domain=' + domain + ' → ' + urls.length + ' product candidates');
   return urls;
 }
 
@@ -476,6 +523,20 @@ function normalizeCandidateUrl_(url, shopConfig) {
   return out;
 }
 
+// Heuristisch: lijkt de URL op een productdetailpagina in plaats van navigatie?
+function isProbableProductPath_(url) {
+  try {
+    var parsed = new URL(url);
+    var path = parsed.pathname || '';
+    if (!path || path === '/' || /\.(svg|png|jpg|jpeg|gif)$/i.test(path)) return false;
+    if (/\b(account|customer|login|register|cart|winkelwagen|search|zoeken)\b/i.test(path)) return false;
+    if (path.split('/').length < 2) return false;
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
 // Controleert of een URL op de blacklist staat
 function isBlacklistedDomain_(url) {
   try {
@@ -491,18 +552,25 @@ function verifyProductMatch_(mainProduct, url, shopConfig) {
   try {
     var resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true });
     Utilities.sleep(300);
-    if (resp.getResponseCode() !== 200) return { matched: false };
+    var code = resp.getResponseCode();
+    if (code !== 200) {
+      Logger.log('verifyProductMatch_ HTTP ' + code + ' for ' + url);
+      return { matched: false };
+    }
     var html = resp.getContentText();
 
     var productId = String(mainProduct.productId || '').trim();
     if (productId && /^\d{10,14}$/.test(productId)) {
-      if (html.indexOf(productId) !== -1) {
-        return { matched: true, gtin: productId, title: mainProduct.name || '' };
+      var gtins = extractGtinsFromHtml_(html);
+      if (html.indexOf(productId) !== -1 || gtins.indexOf(productId) !== -1) {
+        Logger.log('MATCH ' + productId + ' ← ' + (shopConfig && shopConfig.displayName ? shopConfig.displayName : '') + ' | ' + url);
+        return { matched: true, gtin: productId, title: extractProductName_(html) || mainProduct.name || '' };
       }
     }
 
     var scrapedName = extractProductName_(html) || '';
-    if (scrapedName && namesLikelyMatch_(mainProduct.name, scrapedName)) {
+    if (scrapedName && namesLikelyMatchFlexible_(mainProduct.name, scrapedName)) {
+      Logger.log('MATCH ' + (mainProduct.productId || mainProduct.name) + ' ← ' + (shopConfig && shopConfig.displayName ? shopConfig.displayName : '') + ' | ' + url);
       return { matched: true, title: scrapedName, gtin: '' };
     }
   } catch (e) {
@@ -524,13 +592,57 @@ function extractProductName_(html) {
           if (obj['@graph'][j].name) return obj['@graph'][j].name;
         }
       }
+      if (Array.isArray(obj)) {
+        for (var k = 0; k < obj.length; k++) {
+          if (obj[k] && obj[k].name) return obj[k].name;
+        }
+      }
     }
   } catch (e) {
     // ignore
   }
   var h1 = html.match(/<h1[^>]*>([^<]+)<\/h1>/i);
   if (h1) return h1[1];
+  var title = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+  if (title) return title[1];
   return '';
+}
+
+// Extraheert mogelijke GTIN/EAN waarden uit HTML (JSON-LD of attributen)
+function extractGtinsFromHtml_(html) {
+  var gtins = [];
+  try {
+    var ldMatches = html.match(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi) || [];
+    for (var i = 0; i < ldMatches.length; i++) {
+      var txt = ldMatches[i].replace(/<[^>]+>/g, '');
+      var obj = JSON.parse(txt);
+      var candidates = [];
+      if (Array.isArray(obj)) {
+        candidates = obj;
+      } else if (obj && obj['@graph']) {
+        candidates = obj['@graph'];
+      } else if (obj) {
+        candidates = [obj];
+      }
+      candidates.forEach(function (item) {
+        if (!item) return;
+        ['gtin', 'gtin8', 'gtin12', 'gtin13', 'gtin14', 'sku', 'productId'].forEach(function (key) {
+          var val = item[key];
+          if (val && /^\d{8,14}$/.test(String(val))) {
+            gtins.push(String(val));
+          }
+        });
+      });
+    }
+  } catch (e) {
+    // ignore
+  }
+  var attrMatch = html.match(/(data-[a-z]*ean|data-gtin|itemprop="gtin13"|itemprop='gtin13')[^>]*?(\d{8,14})/gi) || [];
+  attrMatch.forEach(function (m) {
+    var numMatch = (m.match(/(\d{8,14})/) || [])[1];
+    if (numMatch) gtins.push(numMatch);
+  });
+  return gtins.filter(function (val, idx, arr) { return arr.indexOf(val) === idx; });
 }
 
 // Eenvoudige naamvergelijking
@@ -539,6 +651,22 @@ function namesLikelyMatch_(a, b) {
   var nb = normalizeName_(b);
   if (!na || !nb) return false;
   return nb.indexOf(na) !== -1 || na.indexOf(nb) !== -1;
+}
+
+// Meer vergevingsgezinde naamvergelijking voor discovery (token overlap)
+function namesLikelyMatchFlexible_(a, b) {
+  var na = normalizeName_(a);
+  var nb = normalizeName_(b);
+  if (!na || !nb) return false;
+  if (na.indexOf(nb) !== -1 || nb.indexOf(na) !== -1) return true;
+  var tokensA = na.split(/\s+/).filter(function (t) { return t.length > 2; });
+  var tokensB = nb.split(/\s+/).filter(function (t) { return t.length > 2; });
+  if (!tokensA.length || !tokensB.length) return false;
+  var setB = {};
+  tokensB.forEach(function (t) { setB[t] = true; });
+  var overlap = tokensA.filter(function (t) { return setB[t]; }).length;
+  var threshold = Math.max(1, Math.floor(Math.min(tokensA.length, tokensB.length) * 0.5));
+  return overlap >= threshold;
 }
 
 // Normaliseert productnamen voor vergelijking
