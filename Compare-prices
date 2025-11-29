@@ -451,108 +451,76 @@ function chooseSearchQuery_(mainProduct) {
   return '';
 }
 
-// Haalt mogelijke product-URLs uit een zoekresultaat-HTML (shop-specifiek, max 5)
+// Haalt mogelijke product-URLs uit een zoekresultaat-HTML
 function extractProductUrlsFromSearch_(shopKey, html, shopConfig) {
+  var urls = [];
   try {
-    var urls = [];
+    if (!html || !shopConfig || !shopConfig.domain) {
+      Logger.log('EXTRACT [' + shopKey + '] missing html or domain');
+      return [];
+    }
+
+    var domain = shopConfig.domain.replace(/^www\./, '').toLowerCase();
+
+    // 1) Alle <a ... href="..."> verzamelen
+    var hrefRe = /<a\b[^>]*href=["']([^"']+)["'][^>]*>/gi;
+    var rawHrefs = [];
+    var m;
+    while ((m = hrefRe.exec(html)) !== null && rawHrefs.length < 200) { // cap voor performance
+      rawHrefs.push(m[1]);
+    }
+
+    // 2) Normaliseren naar absolute URL + grove filtering
     var seen = {};
-    var domain = (shopConfig && shopConfig.domain) ? shopConfig.domain : '';
-    var normalizedDomain = domain.replace(/^www\./i, '');
+    for (var i = 0; i < rawHrefs.length; i++) {
+      var raw = rawHrefs[i];
+      if (!raw) continue;
 
-    function normalizeToAbsolute_(raw) {
-      if (!raw) return '';
-      var url = String(raw).trim().replace(/&amp;/g, '&');
-      if (url.indexOf('#') === 0 || /^\s*(mailto:|tel:|javascript:)/i.test(url)) return '';
-      if (url.indexOf('//') === 0) {
-        url = 'https:' + url;
-      } else if (url.indexOf('/') === 0) {
-        url = 'https://' + domain + url;
-      } else if (!/^https?:\/\//i.test(url)) {
-        url = 'https://' + domain + (url.indexOf('/') === 0 ? '' : '/') + url;
-      }
-      return url;
-    }
+      // Dingen die we sowieso niet willen
+      if (raw[0] === '#') continue;
+      if (/^(mailto:|tel:|javascript:)/i.test(raw)) continue;
 
-    function acceptCandidate_(raw) {
-      if (!raw || urls.length >= 5) return;
-      var abs = normalizeToAbsolute_(raw);
-      if (!abs) return;
+      var normalized = normalizeCandidateUrl_(raw, shopConfig);
+      if (!normalized) continue;
+
+      // Host moet het juiste domein bevatten
       try {
-        var parsed = new URL(abs);
-        var host = (parsed.hostname || '').replace(/^www\./i, '');
-        var path = parsed.pathname || '';
-        if (host.indexOf(normalizedDomain) === -1) return;
-        if (!path || path === '/' || /\.(svg|png|jpg|jpeg|gif|webp|css|js)$/i.test(path)) return;
-        if (/\b(account|customer|login|register|cart|winkelwagen|wishlist|search|zoeken|filter)\b/i.test(path)) return;
-        if (path.split('/').length < 2) return;
-      } catch (e) {
-        return;
-      }
-      if (seen[abs]) return;
-      seen[abs] = true;
-      urls.push(abs);
-    }
+        var u = new URL(normalized);
+        var host = u.hostname.replace(/^www\./, '').toLowerCase();
+        if (host.indexOf(domain) === -1) continue;
 
-    function collectFromRegex_(re) {
-      if (!re) return;
-      var m;
-      while ((m = re.exec(html)) !== null && urls.length < 5) {
-        acceptCandidate_(m[1]);
-      }
-    }
+        var path = u.pathname || '/';
 
-    var re;
-    switch (shopKey) {
-      case 'babydump':
-        re = /<a[^>]+href="([^"]+)"[^>]+class="[^"]*(?:product|product-item|product-link|product-image|product-card)[^"]*"/gi;
-        collectFromRegex_(re);
-        break;
-      case 'prenatal':
-        re = /<a[^>]+href="([^"]+)"[^>]+class="[^"]*(?:product|product-item|product-link|product__image|product--link)[^"]*"/gi;
-        collectFromRegex_(re);
-        break;
-      case 'babyentiener':
-        re = /<a[^>]+href="([^"]+)"[^>]+class="[^"]*(?:product|product-item|product-grid-item|product-card|product-link)[^"]*"/gi;
-        collectFromRegex_(re);
-        break;
-      case 'babyplanet':
-        re = /<a[^>]+href="([^"]+)"[^>]+class="[^"]*(?:product|product-item|product-image|product-link)[^"]*"/gi;
-        collectFromRegex_(re);
-        break;
-      case 'mamaloes':
-        re = /<a[^>]+href="([^"]+)"[^>]+class="[^"]*(?:product|product-item|product-thumb|product-grid-product|product-link)[^"]*"/gi;
-        collectFromRegex_(re);
-        break;
-      case 'vanasten':
-        re = /<a[^>]+href="([^"]+)"[^>]+class="[^"]*(?:product|product-item|product-image|product-link|product-card)[^"]*"/gi;
-        collectFromRegex_(re);
-        break;
-      default:
-        if (domain) {
-          collectFromRegex_(new RegExp('<a[^>]+href="([^"]*' + domain.replace(/\./g, '\\.') + '[^"]*)"[^>]*>', 'gi'));
+        // Grofweg niet-interessante paden eruit filteren
+        if (/\/(account|customer|login|register|cart|winkelwagen|wishlist|zoeken|search)\b/i.test(path)) {
+          continue;
         }
-    }
 
-    if (urls.length === 0) {
-      var genericRe = /<a[^>]+href="([^"]+)"[^>]*>/gi;
-      var m2;
-      while ((m2 = genericRe.exec(html)) !== null && urls.length < 5) {
-        var href = m2[1];
-        if (!href || href.indexOf('#') === 0 || /^\s*(mailto:|tel:|javascript:)/i.test(href)) continue;
-        if (/\b(account|customer|login|register|cart|winkelwagen|wishlist|search|zoeken|filter)\b/i.test(href)) continue;
-        acceptCandidate_(href);
+        // Een beetje "product-achtig": bevat een streepje of een cijfer
+        if (!/[-0-9]/.test(path)) continue;
+
+        // De-dup
+        if (!seen[normalized]) {
+          seen[normalized] = true;
+          urls.push(normalized);
+          if (urls.length >= 5) break; // max 5 kandidaten per shop
+        }
+      } catch (e) {
+        // URL constructor faalt → skip
       }
     }
 
-    Logger.log('EXTRACT [' + shopKey + '] domain=' + domain + ' → ' + urls.length + ' product candidates');
-    urls.slice(0, 3).forEach(function (u, i) {
-      Logger.log('EXTRACT [' + shopKey + '] candidate #' + (i + 1) + ': ' + u);
+    Logger.log('EXTRACT [' + shopKey + '] domain=' + shopConfig.domain +
+               ' → ' + urls.length + ' product candidates (raw hrefs=' + rawHrefs.length + ')');
+    urls.slice(0, 3).forEach(function (u, idx) {
+      Logger.log('EXTRACT [' + shopKey + '] candidate #' + (idx + 1) + ': ' + u);
     });
-    return urls.slice(0, 5);
-  } catch (e) {
-    Logger.log('EXTRACT error for ' + shopKey + ': ' + e);
-    return [];
-  }
+
+  return urls;
+} catch (e) {
+  Logger.log('EXTRACT error for ' + shopKey + ': ' + e);
+  return [];
+}
 }
 
 // Normaliseert een gevonden URL naar een absolute https-URL
@@ -585,11 +553,11 @@ function isProbableProductPath_(url) {
 
 // Controleert of een URL op de blacklist staat
 function isBlacklistedDomain_(url) {
-  try {
-    var host = new URL(url).hostname.toLowerCase();
-    return host.indexOf('bol.com') !== -1;
-  } catch (e) {
-    return true;
+try {
+  var host = new URL(url).hostname.toLowerCase();
+  return host.indexOf('bol.com') !== -1;
+} catch (e) {
+  return true;
   }
 }
 
