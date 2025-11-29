@@ -463,84 +463,67 @@ function extractProductUrlsFromSearch_(shopKey, html, shopConfig) {
     var domain = shopConfig.domain.replace(/^www\./, '').toLowerCase();
     var seen = {};
 
+    // Gebruik jouw bestaande normalizer, maar dan expliciet op het shop-domein
     function normalizeToAbsolute_(raw) {
       if (!raw) return '';
       var url = String(raw).trim().replace(/&amp;/g, '&');
-      if (url.indexOf('#') === 0 || /^(mailto:|tel:|javascript:)/i.test(url)) return '';
+
+      // dingen die sowieso geen product zijn
+      if (url[0] === '#') return '';
+      if (/^(mailto:|tel:|javascript:)/i.test(url)) return '';
+
+      // relatieve -> absolute URL
       if (url.indexOf('//') === 0) {
         url = 'https:' + url;
       } else if (url.indexOf('/') === 0) {
         url = 'https://' + domain + url;
       } else if (!/^https?:\/\//i.test(url)) {
-        url = 'https://' + domain + (url.indexOf('/') === 0 ? '' : '/') + url;
+        url = 'https://' + domain + (url[0] === '/' ? '' : '/') + url;
       }
       return url;
     }
 
-    function considerUrl(raw) {
-      if (!raw || urls.length >= 5) return;
-      var abs = normalizeToAbsolute_(raw);
+    function considerUrl(rawHref) {
+      if (!rawHref || urls.length >= 5) return;
+
+      var abs = normalizeToAbsolute_(rawHref);
       if (!abs) return;
+
       try {
-        var parsed = new URL(abs);
-        var host = parsed.hostname.replace(/^www\./, '').toLowerCase();
+        var u = new URL(abs);
+        var host = u.hostname.replace(/^www\./, '').toLowerCase();
         if (host.indexOf(domain) === -1) return;
-        var path = parsed.pathname || '/';
+
+        var path = u.pathname || '/';
+
+        // duidelijke niet-product dingen eruit
         if (/\.(svg|png|jpe?g|gif|webp)$/i.test(path)) return;
-        if (/\/(account|customer|login|register|cart|winkelwagen|wishlist|zoeken|search|klantenservice)\b/i.test(path)) return;
-        if (!/[-0-9]/.test(path) && path.split('/').length < 3) return;
+        if (/\/(account|customer|login|register|cart|winkelwagen|basket|wishlist|klantenservice|contact|search|zoeken)\b/i.test(path)) return;
+
+        // simpele dedup
         if (seen[abs]) return;
         seen[abs] = true;
+
         urls.push(abs);
       } catch (e) {
-        // ignore malformed
+        // kapotte URL? overslaan
       }
     }
 
-    var re;
-    switch (shopKey) {
-      case 'babydump':
-        re = /<a[^>]+href=["']([^"']+)["'][^>]+class="[^"]*(product|product-item|product__link|productlink|product-image)[^"]*"/gi;
-        break;
-      case 'prenatal':
-        re = /<a[^>]+href=["']([^"']+)["'][^>]+class="[^"]*(product|product-item|product-link|product-image|product__image)[^"]*"/gi;
-        break;
-      case 'babyentiener':
-        re = /<a[^>]+href=["']([^"']+)["'][^>]+class="[^"]*(product|product-item|product-link|product-image|product__link)[^"]*"/gi;
-        break;
-      case 'babyplanet':
-        re = /<a[^>]+href=["']([^"']+)["'][^>]+class="[^"]*(product|product-item|product-link|product-image|product__link)[^"]*"/gi;
-        break;
-      case 'mamaloes':
-        re = /<a[^>]+href=["']([^"']+)["'][^>]+class="[^"]*(product|product-item|product-link|product-image|product__link)[^"]*"/gi;
-        break;
-      case 'vanasten':
-        re = /<a[^>]+href=["']([^"']+)["'][^>]+class="[^"]*(product|product-item|product-link|product-image|product__link)[^"]*"/gi;
-        break;
+    // 1) alle <a ... href="..."> uit de HTML trekken
+    var hrefRe = /<a\b[^>]*href=["']([^"']+)["'][^>]*>/gi;
+    var m;
+    var rawCount = 0;
+    while ((m = hrefRe.exec(html)) !== null && rawCount < 500) { // cap voor performance
+      rawCount++;
+      considerUrl(m[1]);
+      if (urls.length >= 5) break;
     }
 
-    if (re) {
-      var m;
-      while ((m = re.exec(html)) !== null && urls.length < 5) {
-        considerUrl(m[1]);
-      }
-    }
-
-    if (!urls.length) {
-      var genericRe = /<a[^>]+href=["']([^"']+)["'][^>]*>/gi;
-      var gm;
-      while ((gm = genericRe.exec(html)) !== null && urls.length < 5) {
-        var href = gm[1];
-        if (!href) continue;
-        if (/^#/i.test(href)) continue;
-        if (/^(mailto:|tel:|javascript:)/i.test(href)) continue;
-        if (/\/(account|customer|login|register|cart|winkelwagen|wishlist|search|zoeken)\b/i.test(href)) continue;
-        considerUrl(href);
-      }
-    }
-
-    Logger.log('EXTRACT [' + shopKey + '] domain=' + shopConfig.domain +
-      ' → ' + urls.length + ' product candidates');
+    Logger.log(
+      'EXTRACT [' + shopKey + '] domain=' + shopConfig.domain +
+      ' → ' + urls.length + ' product candidates (raw hrefs=' + rawCount + ')'
+    );
     urls.slice(0, 3).forEach(function (u, idx) {
       Logger.log('EXTRACT [' + shopKey + '] candidate #' + (idx + 1) + ': ' + u);
     });
