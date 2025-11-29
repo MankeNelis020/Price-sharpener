@@ -1,256 +1,244 @@
 /***** CONFIG *****/
-const SHEET_INPUT         = 'Blad1';        // leest C2:C (zoektermen)
-const SHEET_HISTORY       = 'Prijshistorie';// append-log
-const SHEET_SNAPSHOT      = 'Concurrenten'; // "Tabblad B"
-const SERPAPI_KEY         = PropertiesService.getScriptProperties().getProperty('SERPAPI_API_KEY');
+const SHEET_INPUT   = 'Blad1';
+const SHEET_SNAPSHOT = 'Concurrenten';
+const SERPAPI_KEY   = PropertiesService.getScriptProperties().getProperty('SERPAPI_API_KEY');
 
-// Whitelist (namen én domeinen; varianten/aliases inbegrepen)
-const WHITELIST = [
-  // Baby-speciaalzaken
-  'babypark','babypark.nl',
-  'prénatal','prenatal','prenatal.nl',
-  'babydump','baby-dump','baby-dump.nl','babydump.nl','babydump.be',
-  'van asten','vanasten','vanastenbabysuperstore','vanastenbabysuperstore.nl',
-  'ikenik','ikenik.nl',
-  'baby & tiener','babyentiener','baby-en-tiener','babyentiener.nl',
-  'mama loes','mamaloes','mamaloes.nl','mamaloesbabyshop','mamaloesbabyshop.nl',
-  'babyplanet','babyplanet.nl',
-  'babyhuis casita','babyhuiscasita','babyhuiscasita.nl',
-  'keekabuu','keekabuu.com','keekabuu.nl',
-  'pinkorblue','pinkorblue.nl','pinkorblue.be',
-
-  // (Merksites – soms scherpe acties)
-  'bugaboo','bugaboo.com',
-  'joolz','joolz.com',
-  'stokke','stokke.com',
-  'cybex','cybex-online.com',
-
-  // Grote retailers / marketplaces
-  'bol','bol.com',
-  'coolblue','coolblue.nl',
-  'amazon','amazon.nl',
-  'wehkamp','wehkamp.nl',
-  'mediamarkt','mediamarkt.nl',
-  'bcc','bcc.nl',
-  'blokker','blokker.nl',
-  'hema','hema.nl',
-  'ikea','ikea.com','ikea.nl',
-
-  // Drogisterijen / supermarkten (voor luiers/billen doekjes e.d.)
-  'kruidvat','kruidvat.nl',
-  'etos','etos.nl',
-  'trekpleister','trekpleister.nl',
-  'ah','albert heijn','ah.nl',
-  'jumbo','jumbo.com','jumbo.com/nl','jumbo.nl'
+// Whitelisted competitor domains
+const WHITELIST_DOMAINS = [
+  'babypark.nl',
+  'baby-dump.nl',
+  'prenatal.nl',
+  'babyentiener.nl',
+  'babyplanet.nl',
+  'mamaloes.nl'
 ];
 
-
-/***** ENTRYPOINT *****/
-function prijsAgentConcurrenten() {
+/***** MAIN WORKFLOW *****/
+// Runs the SerpAPI-based competitor check for all products in Blad1.
+function runDailyPriceCheck() {
   if (!SERPAPI_KEY) throw new Error('SERPAPI_API_KEY ontbreekt (Project Settings → Script properties).');
 
-  const ss = SpreadsheetApp.getActive();
-  const input = ss.getSheetByName(SHEET_INPUT);
-  if (!input) throw new Error(`Tabblad ${SHEET_INPUT} ontbreekt.`);
+  var products = getProductList();
+  if (!products.length) return;
 
-  const queries = readQueries_(input);          // [{row, query}]
-  if (!queries.length) return;
+  var snapshot = ensureSnapshotSheet_();
+  var index = buildSnapshotIndex_(snapshot);
+  var drops = [];
+  var now = new Date();
 
-  const history = ensureSheet_(ss, SHEET_HISTORY, [
-    'Product', 'Leverancier', 'URL', 'Prijs', 'Valuta', 'Gezocht op'
-  ]);
-  const snap    = ensureSheet_(ss, SHEET_SNAPSHOT, [
-    'Product', 'Leverancier', 'URL', 'Huidige prijs', 'Laatste prijs', 'Laagste prijs ooit', '% korting t.o.v. laatste', 'Laatst gecheckt'
-  ]);
+  products.forEach(function (product) {
+    var results = fetchSerpApiPrices(product);
+    updateCompetitorsSheet(product, results, snapshot, index, drops, now);
+  });
 
-  // bouw in-memory prijs-historiek (laatste & laagste per product+leverancier)
-  const histIndex = buildHistoryIndex_(history);
-
-  const now = new Date();
-  const appendRows = [];   // voor Prijshistorie
-  const snapshotRows = []; // voor Concurrenten (we schrijven daarna in bulk)
-
-  for (const {query} of queries) {
-    // 1) haal kandidaten op
-    const items = searchGoogleShopping_(query);
-
-    // 2) whitelist-filter
-    const allowed = items.filter(it => isWhitelisted_(it.store));
-
-    // 3) voor elk resultaat: append naar historie + updaten van “laatste”/“laagste”
-    for (const it of allowed) {
-      const key  = makeKey_(query, it.store);
-      const last = histIndex.get(key)?.last ?? null;
-      const low  = histIndex.get(key)?.low  ?? null;
-
-      // schrijf naar historie-buffer
-      appendRows.push([query, it.store, it.link, it.price, it.currency || 'EUR', now]);
-
-      // update index voor volgende hits binnen deze run
-      const newLast = it.price;
-      const newLow  = (low == null) ? it.price : Math.min(low, it.price);
-      histIndex.set(key, { last: newLast, low: newLow });
-
-      // rij klaarzetten voor snapshot; % korting (kolom G) vullen we met sheet-formule
-      snapshotRows.push([
-        query,                // A Product
-        it.store,             // B Leverancier
-        it.link,              // C URL
-        it.price,             // D Huidige prijs
-        last,                 // E Laatste prijs
-        newLow,               // F Laagste prijs ooit
-        '',                   // G % korting (komt als formule)
-        now                   // H Laatst gecheckt
-      ]);
-    }
-  }
-
-  // 4) flush append naar Historie (SAFE)
-  if (appendRows.length) {
-    const historyLast = history.getLastRow();     // header = 1 als leeg
-    const start = historyLast + 1;                // eerste vrije rij
-    history.insertRowsAfter(historyLast, appendRows.length);
-    history.getRange(start, 1, appendRows.length, appendRows[0].length).setValues(appendRows);
-  }
-
-  // 5) ververs snapshot-tab
-  clearKeepHeader_(snap);
-  if (snapshotRows.length) {
-    snap.insertRowsAfter(1, snapshotRows.length);
-    snap.getRange(2, 1, snapshotRows.length, snapshotRows[0].length).setValues(snapshotRows);
-
-    // 6) % korting-formule + formats
-    const lastRow = 1 + snapshotRows.length;
-    for (let r = 2; r <= lastRow; r++) {
-      snap.getRange(r, 7).setFormula(`=ALS.FOUT((E${r}-D${r})/E${r};0)`); // kolom G
-    }
-    snap.getRange(2, 4, snapshotRows.length, 3).setNumberFormat('€ #,##0.00'); // D:E:F
-    snap.getRange(2, 7, snapshotRows.length, 1).setNumberFormat('0,0%');       // G
-    snap.getRange(2, 8, snapshotRows.length, 1).setNumberFormat('dd-mm-yyyy hh:mm'); // H
-  }
-}
-
-/***** Helpers *****/
-function readQueries_(sheet) {
-  // leest C2:C (stop bij lege rij)
-  const col = 3; // C
-  const rows = sheet.getRange(2, col, Math.max(1, sheet.getLastRow() - 1), 1).getValues();
-  const out = [];
-  for (let i = 0; i < rows.length; i++) {
-    const q = String(rows[i][0] || '').trim();
-    if (!q) continue;
-    out.push({ row: 2 + i, query: q });
-  }
-  return out;
-}
-
-function ensureSheet_(ss, name, headers) {
-  let sh = ss.getSheetByName(name);
-  if (!sh) {
-    sh = ss.insertSheet(name);
-  }
-  if (sh.getLastRow() === 0) {
-    sh.appendRow(headers);
-  } else {
-    // zorg dat headers kloppen (optioneel)
-    const firstRow = sh.getRange(1, 1, 1, headers.length).getValues()[0];
-    const mismatch = headers.some((h, i) => firstRow[i] !== h);
-    if (mismatch) {
-      sh.clearContents();
-      sh.appendRow(headers);
-    }
-  }
-  return sh;
-}
-
-function clearKeepHeader_(sh) {
-  const last = sh.getLastRow();
-  if (last > 1) sh.getRange(2, 1, last - 1, sh.getMaxColumns()).clearContent();
-}
-
-// PATCH: robuuste whitelist (namen én domeinen)
-function isWhitelisted_(store) {
-  const s = (store || '').toLowerCase();
-  if (!s) return false;
-  const alias = s
-    .replace(/^www\./,'')
-    .replace(/\.nl$|\.com$|\.be$|\.de$/,'')
-    .replace(/-|\s/g,''); // baby-dump.nl -> babydump
-  return WHITELIST.some(w => {
-    const wnorm = w.toLowerCase().replace(/-|\s/g,'');
-    return s.includes(wnorm) || alias.includes(wnorm);
+  drops.forEach(function (drop) {
+    notifyPriceDrop(drop.product, drop.store, drop.url, drop.oldLow, drop.newPrice);
   });
 }
 
-function makeKey_(product, store) {
-  return `${product}__${store}`.toLowerCase();
-}
+/***** SERPAPI FETCH *****/
+// Calls SerpAPI Shopping for a product (by GTIN if present, otherwise by name).
+function fetchSerpApiPrices(product) {
+  var query = product.productId ? String(product.productId).trim() : String(product.name || '').trim();
+  if (!query) return [];
 
-function buildHistoryIndex_(historySheet) {
-  // leest hele historie en bouwt {last, low} per (product, leverancier)
-  const lastRow = historySheet.getLastRow();
-  const idx = new Map();
-  if (lastRow < 2) return idx;
-
-  const vals = historySheet.getRange(2, 1, lastRow - 1, 6).getValues();
-  // Kolommen: Product, Leverancier, URL, Prijs, Valuta, Gezocht op
-  for (let i = 0; i < vals.length; i++) {
-    const [product, store, , price] = vals[i];
-    const key = makeKey_(product, store);
-    const rec = idx.get(key) || { last: null, low: null };
-    rec.last = price;                             // laatste = onderaan
-    rec.low  = rec.low == null ? price : Math.min(rec.low, price);
-    idx.set(key, rec);
-  }
-  return idx;
-}
-
-/***** SerpAPI wrapper (PATCH: store-fallback + logging) *****/
-function searchGoogleShopping_(query) {
-  const params = {
+  var params = {
     engine: 'google_shopping',
     q: query,
     hl: 'nl',
     gl: 'nl',
     api_key: SERPAPI_KEY
   };
-  const url = 'https://serpapi.com/search.json?' + toQueryString_(params);
-  const resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true });
-  const code = resp.getResponseCode();
-  if (code !== 200) {
-    Logger.log('SerpAPI HTTP ' + code + ' → ' + resp.getContentText());
+  var url = 'https://serpapi.com/search.json?' + toQueryString_(params);
+  var resp;
+  try {
+    resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true });
+  } catch (e) {
+    Logger.log('SerpAPI fetch error for ' + query + ': ' + e);
     return [];
   }
-  const json = JSON.parse(resp.getContentText());
-  const items = json.shopping_results || [];
+  if (resp.getResponseCode() !== 200) {
+    Logger.log('SerpAPI HTTP ' + resp.getResponseCode() + ' for ' + query + ': ' + resp.getContentText());
+    return [];
+  }
 
-  const mapped = items.map(it => {
-    let link  = it.link || it.product_link || '';
-    let store = it.source || it.source_id || (it.sellers && it.sellers[0]?.source) || '';
+  var json = JSON.parse(resp.getContentText());
+  var items = json.shopping_results || [];
+  var mapped = [];
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i];
+    var link = it.link || it.product_link || '';
+    if (!isAllowedDomain_(link)) continue;
+    var store = it.source || it.source_id || '';
     if (!store && link) {
-      try { store = new URL(link).hostname.replace(/^www\./,''); } catch(e) {}
+      try { store = new URL(link).hostname.replace(/^www\./, ''); } catch (e) {}
     }
-    return {
+    var price = parsePrice_(it.extracted_price != null ? it.extracted_price : it.price);
+    if (price == null || !link) continue;
+    mapped.push({
       title: it.title || '',
-      store,
-      price: parsePrice_(it.extracted_price ?? it.price),
+      store: store || '',
+      price: price,
       currency: it.currency || 'EUR',
-      link
-    };
-  }).filter(x => x.price != null && x.link);
+      link: link
+    });
+  }
 
-  Logger.log(`[SERP] "${query}" → ${items.length} items / na mapping ${mapped.length}`);
-  mapped.slice(0,5).forEach((m,i)=>Logger.log(`#${i+1} ${m.store} | €${m.price} | ${m.title}`));
+  Logger.log('SerpAPI "' + query + '" → ' + mapped.length + ' whitelisted items');
   return mapped;
+}
+
+/***** SHEET UPDATES *****/
+// Updates the Concurrenten sheet with latest prices and records price drops.
+function updateCompetitorsSheet(product, results, snapshot, index, drops, now) {
+  results.forEach(function (result) {
+    var key = makeKey_(product, result.store);
+    var rowInfo = index.get(key);
+    var currentPrice = result.price;
+    var lastPrice = '';
+    var lowestPrice = currentPrice;
+
+    if (rowInfo) {
+      var rowVals = rowInfo.values;
+      var previousCurrent = rowVals[3];
+      var previousLow = rowVals[5];
+      lastPrice = previousCurrent;
+      if (previousLow !== '' && previousLow != null) {
+        lowestPrice = Math.min(Number(previousLow), currentPrice);
+        if (currentPrice < Number(previousLow)) {
+          drops.push({ product: product, store: result.store, url: result.link, oldLow: previousLow, newPrice: currentPrice });
+        }
+      }
+      var update = [
+        product.name,
+        result.store,
+        result.link,
+        currentPrice,
+        lastPrice,
+        lowestPrice,
+        '',
+        now
+      ];
+      snapshot.getRange(rowInfo.row, 1, 1, update.length).setValues([update]);
+      snapshot.getRange(rowInfo.row, 7).setFormula('=IFERROR((E' + rowInfo.row + '-D' + rowInfo.row + ')/E' + rowInfo.row + ',0)');
+      index.set(key, { row: rowInfo.row, values: update });
+    } else {
+      var newRow = snapshot.getLastRow() + 1;
+      var insert = [
+        product.name,
+        result.store,
+        result.link,
+        currentPrice,
+        '',
+        currentPrice,
+        '',
+        now
+      ];
+      snapshot.appendRow(insert);
+      snapshot.getRange(newRow, 7).setFormula('=IFERROR((E' + newRow + '-D' + newRow + ')/E' + newRow + ',0)');
+      index.set(key, { row: newRow, values: insert });
+    }
+  });
+}
+
+/***** NOTIFICATIONS *****/
+// Sends an email when a new lowest price is detected.
+function notifyPriceDrop(product, store, url, oldLow, newPrice) {
+  var subject = '[Prijsdaling] ' + (product.name || product.productId);
+  var body = 'Shop: ' + store + '\n' +
+             'Product: ' + (product.name || '') + '\n' +
+             'Oude laagste prijs: ' + (oldLow || '') + '\n' +
+             'Nieuwe prijs: ' + newPrice + '\n' +
+             'URL: ' + url;
+  var recipient = Session.getActiveUser().getEmail();
+  MailApp.sendEmail(recipient, subject, body);
+}
+
+/***** INPUT *****/
+// Reads products from Blad1; expects headers with Product and ProductId.
+function getProductList() {
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getSheetByName(SHEET_INPUT);
+  if (!sh) return [];
+  var last = sh.getLastRow();
+  if (last < 2) return [];
+
+  var headers = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  var map = headerMap_(headers);
+  var idxName = map['product'];
+  var idxId = map['productid'];
+  if (idxName == null && idxId == null) return [];
+
+  var data = sh.getRange(2, 1, last - 1, headers.length).getValues();
+  var products = [];
+  for (var i = 0; i < data.length; i++) {
+    var name = idxName != null ? String(data[i][idxName] || '').trim() : '';
+    var pid = idxId != null ? String(data[i][idxId] || '').trim() : '';
+    if (!name && !pid) continue;
+    products.push({ name: name, productId: pid });
+  }
+  Logger.log('Loaded ' + products.length + ' products from ' + SHEET_INPUT);
+  return products;
+}
+
+/***** HELPERS *****/
+function ensureSnapshotSheet_() {
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getSheetByName(SHEET_SNAPSHOT);
+  if (!sh) {
+    sh = ss.insertSheet(SHEET_SNAPSHOT);
+  }
+  var headers = ['Product', 'Leverancier', 'URL', 'Huidige prijs', 'Laatste prijs', 'Laagste prijs ooit', '% korting t.o.v. laatste', 'Laatst gecheckt'];
+  if (sh.getLastRow() === 0) {
+    sh.appendRow(headers);
+  }
+  return sh;
+}
+
+function buildSnapshotIndex_(sh) {
+  var idx = new Map();
+  var last = sh.getLastRow();
+  if (last < 2) return idx;
+  var vals = sh.getRange(2, 1, last - 1, 8).getValues();
+  for (var i = 0; i < vals.length; i++) {
+    var row = vals[i];
+    var key = makeKey_({ name: row[0] }, row[1]);
+    idx.set(key, { row: i + 2, values: row });
+  }
+  return idx;
+}
+
+function makeKey_(product, store) {
+  var base = product.name ? String(product.name) : String(product.productId || '');
+  return (base + '__' + (store || '')).toLowerCase();
+}
+
+function toQueryString_(obj) {
+  return Object.keys(obj).map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(obj[k]); }).join('&');
 }
 
 function parsePrice_(v) {
   if (v == null) return null;
   if (typeof v === 'number') return v;
-  let s = String(v).replace(/[^\d,\.]/g, '').replace(/\./g, '').replace(',', '.');
-  const n = parseFloat(s);
+  var s = String(v).replace(/[^0-9,\.]/g, '').replace(/\./g, '').replace(',', '.');
+  var n = parseFloat(s);
   return isNaN(n) ? null : n;
 }
-function toQueryString_(obj) {
-  return Object.keys(obj).map(k => encodeURIComponent(k) + '=' + encodeURIComponent(obj[k])).join('&');
+
+function headerMap_(headers) {
+  var map = {};
+  headers.forEach(function (h, i) {
+    var key = String(h || '').trim().toLowerCase();
+    if (key) map[key] = i;
+  });
+  return map;
+}
+
+function isAllowedDomain_(url) {
+  try {
+    var host = new URL(url).hostname.replace(/^www\./, '').toLowerCase();
+    return WHITELIST_DOMAINS.some(function (d) { return host.indexOf(d) !== -1; });
+  } catch (e) {
+    return false;
+  }
 }
