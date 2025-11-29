@@ -397,11 +397,11 @@ function discoverCompetitorsForProduct_(mainProduct) {
     }
     Utilities.sleep(300);
     var code = resp.getResponseCode();
-  Logger.log('DISCOVER [' + key + '] GET ' + searchUrl + ' → HTTP ' + code);
+    Logger.log('DISCOVER [' + key + '] GET ' + searchUrl + ' → HTTP ' + code);
     if (code !== 200) return;
 
     const html = resp.getContentText();
-    const candidates = extractProductUrlsFromSearch_(key, html, shop) || [];
+    const candidates = extractProductUrlsFromSearch_(key, html, shop, mainProduct) || [];
     Logger.log('DISCOVER [' + key + '] candidates count=' + candidates.length);
     candidates.forEach(function (rawUrl) {
       const normalized = normalizeCandidateUrl_(rawUrl, shop);
@@ -462,10 +462,11 @@ function chooseSearchQuery_(mainProduct) {
 }
 
 /**
- * Extracts product URLs from search-result HTML using shop-specific containers and link patterns,
- * falling back to a generic anchor sweep with product-path filtering.
+ * Extracts product URLs from search-result HTML using token-based URL scoring
+ * instead of page grid parsing. The scoring is domain-agnostic and keeps only
+ * the best matches against the product name / id.
  */
-function extractProductUrlsFromSearch_(shopKey, html, shop) {
+function extractProductUrlsFromSearch_(shopKey, html, shop, mainProduct) {
   if (!html || !shop || !shop.domain) {
     Logger.log('EXTRACT [' + shopKey + '] missing html or domain');
     return [];
@@ -473,100 +474,121 @@ function extractProductUrlsFromSearch_(shopKey, html, shop) {
 
   var domain = shop.domain.replace(/^www\./, '').toLowerCase();
   var baseUrl = shop.baseUrl || ('https://www.' + domain);
-  var candidates = new Set();
-  var rawHrefCount = 0;
-  var filteredPathCount = 0;
-  var parseFailCount = 0;
-  var containerMatched = false;
-  var MAX_CANDIDATES = 10;
+  var productName = mainProduct && mainProduct.name ? mainProduct.name : '';
+  var productId = mainProduct && mainProduct.productId ? mainProduct.productId : '';
 
-  var CONTAINER_PATTERNS = {
-    prenatal: /<ol[^>]+class=["'][^"']*product-items[^"']*["'][^>]*>[\s\S]*?<\/ol>/i,
-    babydump: /<ol[^>]+class=["'][^"']*product-items[^"']*["'][^>]*>[\s\S]*?<\/ol>/i,
-    babyentiener: /<ol[^>]+class=["'][^"']*product-items[^"']*["'][^>]*>[\s\S]*?<\/ol>/i,
-    babyplanet: /<ol[^>]+class=["'][^"']*product-items[^"']*["'][^>]*>[\s\S]*?<\/ol>/i,
-    vanasten: /<ol[^>]+class=["'][^"']*product-items[^"']*["'][^>]*>[\s\S]*?<\/ol>/i
-  };
+  var candidates = discoverProductCandidates(html, productName, productId, domain, baseUrl) || [];
+  var filtered = candidates.filter(function (u) {
+    try {
+      var host = new URL(u).hostname.replace(/^www\./, '').toLowerCase();
+      return host.indexOf(domain) !== -1;
+    } catch (e) {
+      return false;
+    }
+  });
 
-  var LINK_PATTERNS = {
-    babydump: /<a\s+[^>]*?class=["'][^"']*product-item-link[^"']*["'][^>]*?href=["']([^"']+)["']/gi,
-    prenatal: /<a\s+[^>]*?class=["'][^"']*product-item-link[^"']*["'][^>]*?href=["']([^"']+)["']/gi,
-    babyentiener: /<a\s+[^>]*?class=["'][^"']*product-item-link[^"']*["'][^>]*?href=["']([^"']+)["']/gi,
-    babyplanet: /<a\s+[^>]*?class=["'][^"']*product-item-link[^"']*["'][^>]*?href=["']([^"']+)["']/gi,
-    vanasten: /<a\s+[^>]*?class=["'][^"']*product-item-link[^"']*["'][^>]*?href=["']([^"']+)["']/gi,
-    mamaloes: /<a\s+[^>]*?href=["'](\/[^"]*product[^"]*)["']/gi
-  };
+  Logger.log('EXTRACT [' + shopKey + '] domain=' + domain + ' → ' + filtered.length + ' candidates after scoring');
+  filtered.slice(0, 3).forEach(function (u, idx) {
+    Logger.log('EXTRACT [' + shopKey + '] candidate #' + (idx + 1) + ': ' + u);
+  });
+  return filtered;
+}
 
-  function addCandidate(path) {
-    if (!path || candidates.size >= MAX_CANDIDATES) return;
-    var abs = toAbsoluteUrl(path, baseUrl);
-    if (!abs) return;
+/**
+ * Token-based candidate finder that scores all href URLs in raw HTML and
+ * returns the top matches for the given product.
+ */
+function discoverProductCandidates(html, productName, productId) {
+  var domain = arguments.length > 3 ? arguments[3] : '';
+  var baseUrl = arguments.length > 4 ? arguments[4] : '';
+  var tokens = tokenizeDiscoveryTokens_(productName, productId);
+  Logger.log('TOKENS [' + (productName || productId || '') + '] → ' + tokens.join(', '));
+
+  var hrefRe = /href=["']([^"']+)["']/gi;
+  var match;
+  var rawHrefs = 0;
+  var seen = {};
+  var scored = [];
+  while ((match = hrefRe.exec(html)) !== null) {
+    rawHrefs++;
+    var href = match[1];
+    var abs = toAbsoluteUrl(href, baseUrl || ('https://' + domain));
+    if (!abs) continue;
+
     try {
       var parsed = new URL(abs);
       var host = parsed.hostname.replace(/^www\./, '').toLowerCase();
-      if (host.indexOf(domain) === -1) {
-        filteredPathCount++;
-        return;
+      if (domain && host.indexOf(String(domain).replace(/^www\./, '').toLowerCase()) === -1) continue;
+      if (seen[abs]) continue;
+      seen[abs] = true;
+
+      var score = scoreCandidateUrl_(abs, tokens, productId);
+      if (score && score.passed) {
+        scored.push(score);
+        Logger.log('SCORE url=' + abs + ' score=' + score.score + ' tokensHit=' + score.tokensHit + ' idHit=' + score.idHit);
       }
-      var pathname = parsed.pathname || '/';
-      if (isNonProductPath(pathname)) {
-        filteredPathCount++;
-        return;
-      }
-      if (!isValidProductPath(pathname)) {
-        parseFailCount++;
-        return;
-      }
-      candidates.add(abs);
     } catch (e) {
-      parseFailCount++;
+      // skip invalid URL
     }
   }
 
-  var searchHtml = html;
-  var containerRe = CONTAINER_PATTERNS[shopKey];
-  if (containerRe) {
-    var containerMatch = containerRe.exec(html);
-    if (containerMatch && containerMatch[0]) {
-      searchHtml = containerMatch[0];
-      containerMatched = true;
-    }
-  }
+  scored.sort(function (a, b) {
+    if (b.score !== a.score) return b.score - a.score;
+    if (b.idHit !== a.idHit) return b.idHit ? 1 : -1;
+    return a.url.length - b.url.length;
+  });
 
-  var linkRe = LINK_PATTERNS[shopKey];
-  if (linkRe) {
-    var lm;
-    while ((lm = linkRe.exec(searchHtml)) !== null) {
-      addCandidate(lm[1]);
-      if (candidates.size >= MAX_CANDIDATES) break;
-    }
-  }
+  var winners = scored.slice(0, 5).map(function (s) { return s.url; });
+  Logger.log('EXTRACT scoring → rawHrefs=' + rawHrefs + ' kept=' + winners.length);
+  return winners;
+}
 
-  if (candidates.size === 0) {
-    Logger.log('EXTRACT [' + shopKey + '] no shop-pattern hits, using generic anchor sweep');
-    var anchorRe = /<a\b[^>]*?href=["']([^"']+)["'][^>]*?>/gi;
-    var am;
-    while ((am = anchorRe.exec(searchHtml)) !== null) {
-      rawHrefCount++;
-      var href = am[1];
-      if (isNonProductPath(href)) {
-        filteredPathCount++;
-        continue;
+function tokenizeDiscoveryTokens_(productName, productId) {
+  var stopwords = ['the', 'and', 'for', 'with', 'het', 'de', 'een', 'van', 'met', 'voor', 'en'];
+  var source = (productName || '') + ' ' + (productId || '');
+  var cleaned = source.toLowerCase().replace(/[\.,;:!\(\)\[\]\{\}\+]/g, ' ');
+  cleaned = cleaned.replace(/[_-]/g, ' ');
+  var parts = cleaned.split(/\s+/);
+  var tokens = parts.filter(function (p) {
+    if (!p) return false;
+    if (stopwords.indexOf(p) !== -1) return false;
+    if (/^\d{10,14}$/.test(p)) return true;
+    if (p.length >= 3) return true;
+    return /^[a-z]\d|\d[a-z]/.test(p);
+  });
+  return tokens;
+}
+
+function scoreCandidateUrl_(url, tokens, productId) {
+  if (!tokens || !tokens.length) return null;
+  try {
+    var parsed = new URL(url);
+    var path = (parsed.pathname || '') + ' ' + (parsed.hostname || '');
+    var slug = path.toLowerCase().replace(/[_-]/g, ' ').replace(/[^a-z0-9\s]/g, ' ');
+    var tokensHit = 0;
+    tokens.forEach(function (t) {
+      if (slug.indexOf(t) !== -1) tokensHit++;
+    });
+
+    var score = tokensHit;
+    var idHit = false;
+    if (productId) {
+      var pid = String(productId).replace(/\D/g, '');
+      if (pid && slug.indexOf(pid) !== -1) {
+        score += 3;
+        idHit = true;
       }
-      if (!isValidProductPath(href)) {
-        parseFailCount++;
-        continue;
-      }
-      addCandidate(href);
-      if (candidates.size >= MAX_CANDIDATES) break;
     }
+    if (parsed.pathname && parsed.pathname.length < 80) score += 1;
+    if (/\/(p|product)\//.test(parsed.pathname)) score += 1;
+
+    var minScore = Math.max(2, Math.ceil(tokens.length * 0.4));
+    var passed = score >= minScore && tokensHit >= Math.min(tokens.length, 2);
+
+    return { url: url, score: score, tokensHit: tokensHit, idHit: idHit, passed: passed };
+  } catch (e) {
+    return null;
   }
-
-  Logger.log('EXTRACT [' + shopKey + '] domain=' + domain + ' → ' + candidates.size +
-    ' product candidates (containerMatched=' + containerMatched + ', raw hrefs=' + rawHrefCount +
-    ', filteredPath=' + filteredPathCount + ', parseFail=' + parseFailCount + ')');
-
-  return Array.from(candidates);
 }
 
 function isValidProductPath(path) {
