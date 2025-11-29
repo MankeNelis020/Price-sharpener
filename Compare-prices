@@ -51,8 +51,55 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Price sharpener')
     .addItem('Concurrenten afzoeken', 'prijsAgentConcurrenten')
+    .addSeparator()
+    .addItem('Discover competitors (GTIN search)', 'discoverCompetitorsForAllProducts')
+    .addItem('Check competitor prices now', 'checkCompetitorPricesAndNotify')
     .addToUi();
 }
+
+// Sheetnamen voor bestaande en nieuwe functionaliteit
+const SHEETS = {
+  OVERZICHT: 'Overzicht',
+  PRIJZEN: 'Prijzen',
+  SCRAPE_LOG: 'ScrapeLog',
+  CONCURRENT2: 'Concurrenten-2'
+};
+
+// Shop-configuratie voor automatische competitor discovery
+const SHOP_SEARCH = {
+  babydump: {
+    displayName: 'Babydump',
+    domain: 'baby-dump.nl',
+    searchTemplate: 'https://www.baby-dump.nl/search/?q={QUERY}'
+    // TODO: zoekresultaat-parser voor Babydump verfijnen indien nodig
+  },
+  prenatal: {
+    displayName: 'Prénatal',
+    domain: 'prenatal.nl',
+    searchTemplate: 'https://www.prenatal.nl/catalogsearch/result/?q={QUERY}'
+  },
+  babyentiener: {
+    displayName: 'Baby & Tiener Megastore',
+    domain: 'babyentiener.nl',
+    searchTemplate: 'https://www.babyentiener.nl/searchresults?q={QUERY}'
+  },
+  babyplanet: {
+    displayName: 'BabyPlanet',
+    domain: 'babyplanet.nl',
+    searchTemplate: 'https://www.babyplanet.nl/catalogsearch/result/?q={QUERY}'
+  },
+  mamaloes: {
+    displayName: 'MamaLoes',
+    domain: 'mamaloes.nl',
+    searchTemplate: 'https://www.mamaloes.nl/search?query={QUERY}'
+  },
+  vanasten: {
+    displayName: 'Van Asten',
+    domain: 'vanastenbabysuperstore.nl',
+    // TODO: juiste zoektemplate invullen zodra bekend, bv. 'https://www.vanastenbabysuperstore.nl/search?q={QUERY}'
+    searchTemplate: 'https://www.vanastenbabysuperstore.nl/search?q={QUERY}'
+  }
+};
 
 // Meervoudige zoekopties per product (naam + optioneel GTIN)
 function prijsAgentConcurrenten() {
@@ -279,4 +326,364 @@ function parsePrice_(v) {
 }
 function toQueryString_(obj) {
   return Object.keys(obj).map(k => encodeURIComponent(k) + '=' + encodeURIComponent(obj[k])).join('&');
+}
+
+// Zorgt dat de sheet "Concurrenten-2" bestaat met de juiste headers
+function ensureConcurrentSheet_() {
+  const ss = SpreadsheetApp.getActive();
+  return ensureSheet_(ss, SHEETS.CONCURRENT2, [
+    'ProductId', 'Product', 'Shop', 'URL', 'LaatstePrijs', 'LaatstGecheckt'
+  ]);
+}
+
+// Leest de headerregel en geeft een mapping van lowercased headernaam naar index
+function headerMap_(headers) {
+  const map = {};
+  headers.forEach(function (h, i) {
+    const key = String(h || '').trim().toLowerCase();
+    if (key) map[key] = i;
+  });
+  return map;
+}
+
+// Ontdekt concurrenten voor alle producten in 'Overzicht' en vult "Concurrenten-2"
+function discoverCompetitorsForAllProducts() {
+  const ss = SpreadsheetApp.getActive();
+  const overview = ss.getSheetByName(SHEETS.OVERZICHT);
+  if (!overview) throw new Error('Tabblad Overzicht ontbreekt.');
+
+  const lastRow = overview.getLastRow();
+  if (lastRow < 2) return;
+
+  const headers = overview.getRange(1, 1, 1, overview.getLastColumn()).getValues()[0];
+  const map = headerMap_(headers);
+  const idxProductId = map['productid'];
+  const idxProduct = map['product'];
+  const idxMainUrl = map['url 1'];
+  if (idxProductId == null || idxProduct == null) {
+    throw new Error('Kolommen "ProductId" en "Product" zijn vereist in Overzicht.');
+  }
+
+  const data = overview.getRange(2, 1, lastRow - 1, headers.length).getValues();
+  data.forEach(function (row) {
+    const productId = String(row[idxProductId] || '').trim();
+    const name = String(row[idxProduct] || '').trim();
+    const mainUrl = idxMainUrl == null ? '' : String(row[idxMainUrl] || '').trim();
+    if (!productId && !name) return;
+    discoverCompetitorsForProduct_({ productId: productId, name: name, mainUrl: mainUrl });
+  });
+}
+
+// Ontdekt concurrent-URLs per product en schrijft/updatet ze in "Concurrenten-2"
+function discoverCompetitorsForProduct_(mainProduct) {
+  const query = chooseSearchQuery_(mainProduct);
+  if (!query) return;
+  const sh = ensureConcurrentSheet_();
+  const existing = buildCompetitorIndex_(sh);
+
+  Object.keys(SHOP_SEARCH).forEach(function (key) {
+    const shop = SHOP_SEARCH[key];
+    if (!shop || !shop.searchTemplate) return;
+
+    const searchUrl = shop.searchTemplate.replace('{QUERY}', encodeURIComponent(query));
+    const resp = UrlFetchApp.fetch(searchUrl, { muteHttpExceptions: true, followRedirects: true });
+    Utilities.sleep(300);
+    if (resp.getResponseCode() !== 200) return;
+
+    const html = resp.getContentText();
+    const candidates = extractProductUrlsFromSearch_(key, html, shop) || [];
+    candidates.forEach(function (rawUrl) {
+      const normalized = normalizeCandidateUrl_(rawUrl, shop);
+      if (!normalized || isBlacklistedDomain_(normalized)) return;
+
+      const match = verifyProductMatch_(mainProduct, normalized, shop);
+      if (!match || !match.matched) return;
+
+      const indexKey = makeKey_(mainProduct.productId || mainProduct.name, shop.displayName);
+      const rowInfo = existing.get(indexKey);
+      if (rowInfo) {
+        const currentUrl = rowInfo.values[3];
+        if (currentUrl !== normalized) {
+          sh.getRange(rowInfo.row, 4).setValue(normalized);
+        }
+      } else {
+        sh.appendRow([
+          mainProduct.productId,
+          mainProduct.name,
+          shop.displayName,
+          normalized,
+          '',
+          ''
+        ]);
+      }
+    });
+  });
+}
+
+// Bouwt een index van bestaande concurrenten (per product + shop)
+function buildCompetitorIndex_(sh) {
+  const idx = new Map();
+  const last = sh.getLastRow();
+  if (last < 2) return idx;
+  const vals = sh.getRange(2, 1, last - 1, 6).getValues();
+  vals.forEach(function (row, i) {
+    const key = makeKey_(row[0], row[2]);
+    idx.set(key, { row: i + 2, values: row });
+  });
+  return idx;
+}
+
+// Bepaalt de beste zoekquery (GTIN > productnaam)
+function chooseSearchQuery_(mainProduct) {
+  var productId = String(mainProduct.productId || '').trim();
+  if (/^\d{10,14}$/.test(productId)) return productId;
+  var name = String(mainProduct.name || '').trim();
+  if (name) return name;
+  return '';
+}
+
+// Haalt mogelijke product-URLs uit een zoekresultaat-HTML
+function extractProductUrlsFromSearch_(shopKey, html, shopConfig) {
+  var urls = [];
+  var domain = shopConfig && shopConfig.domain ? shopConfig.domain.replace(/\./g, '\\.') : '';
+  if (domain) {
+    var re = new RegExp('href="([^"]*' + domain + '[^"]*)"', 'gi');
+    var m;
+    while ((m = re.exec(html)) !== null) {
+      urls.push(m[1]);
+      if (urls.length >= 5) break;
+    }
+  }
+  // fallback voor relatieve links
+  if (!urls.length) {
+    var relMatch = html.match(/href="(\/[^"#?]+)"/i);
+    if (relMatch) urls.push(relMatch[1]);
+  }
+  return urls;
+}
+
+// Normaliseert een gevonden URL naar een absolute https-URL
+function normalizeCandidateUrl_(url, shopConfig) {
+  if (!url) return '';
+  var out = url.trim();
+  if (out.startsWith('//')) {
+    out = 'https:' + out;
+  } else if (out.startsWith('/')) {
+    out = 'https://' + (shopConfig && shopConfig.domain ? shopConfig.domain : '') + out;
+  } else if (!/^https?:\/\//i.test(out)) {
+    out = 'https://' + out;
+  }
+  return out;
+}
+
+// Controleert of een URL op de blacklist staat
+function isBlacklistedDomain_(url) {
+  try {
+    var host = new URL(url).hostname.toLowerCase();
+    return host.indexOf('bol.com') !== -1;
+  } catch (e) {
+    return true;
+  }
+}
+
+// Verifieert of een kandidaat-URL matcht met het hoofdproduct (GTIN of naam)
+function verifyProductMatch_(mainProduct, url, shopConfig) {
+  try {
+    var resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true });
+    Utilities.sleep(300);
+    if (resp.getResponseCode() !== 200) return { matched: false };
+    var html = resp.getContentText();
+
+    var productId = String(mainProduct.productId || '').trim();
+    if (productId && /^\d{10,14}$/.test(productId)) {
+      if (html.indexOf(productId) !== -1) {
+        return { matched: true, gtin: productId, title: mainProduct.name || '' };
+      }
+    }
+
+    var scrapedName = extractProductName_(html) || '';
+    if (scrapedName && namesLikelyMatch_(mainProduct.name, scrapedName)) {
+      return { matched: true, title: scrapedName, gtin: '' };
+    }
+  } catch (e) {
+    Logger.log('verifyProductMatch_ error for ' + url + ': ' + e);
+  }
+  return { matched: false };
+}
+
+// Probeert een productnaam uit HTML te halen (JSON-LD of H1)
+function extractProductName_(html) {
+  try {
+    var ldMatches = html.match(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi) || [];
+    for (var i = 0; i < ldMatches.length; i++) {
+      var txt = ldMatches[i].replace(/<[^>]+>/g, '');
+      var obj = JSON.parse(txt);
+      if (obj && obj.name) return obj.name;
+      if (obj && obj['@graph']) {
+        for (var j = 0; j < obj['@graph'].length; j++) {
+          if (obj['@graph'][j].name) return obj['@graph'][j].name;
+        }
+      }
+    }
+  } catch (e) {
+    // ignore
+  }
+  var h1 = html.match(/<h1[^>]*>([^<]+)<\/h1>/i);
+  if (h1) return h1[1];
+  return '';
+}
+
+// Eenvoudige naamvergelijking
+function namesLikelyMatch_(a, b) {
+  var na = normalizeName_(a);
+  var nb = normalizeName_(b);
+  if (!na || !nb) return false;
+  return nb.indexOf(na) !== -1 || na.indexOf(nb) !== -1;
+}
+
+// Normaliseert productnamen voor vergelijking
+function normalizeName_(s) {
+  if (!s) return '';
+  return s.toString()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+// Controleert prijzen van concurrenten in "Concurrenten-2" en stuurt mails bij wijzigingen
+function checkCompetitorPricesAndNotify() {
+  var sh = ensureConcurrentSheet_();
+  var last = sh.getLastRow();
+  if (last < 2) return;
+
+  var vals = sh.getRange(2, 1, last - 1, 6).getValues();
+  var updates = [];
+  var changesByProduct = {};
+  var now = new Date();
+
+  for (var i = 0; i < vals.length; i++) {
+    var row = vals[i];
+    var productId = String(row[0] || '').trim();
+    var productName = String(row[1] || '').trim();
+    var shopName = String(row[2] || '').trim();
+    var url = String(row[3] || '').trim();
+    var lastPrice = row[4];
+    var newPrice = lastPrice;
+    var newChecked = row[5];
+
+    if (!productId || !url) {
+      updates.push([lastPrice, newChecked]);
+      continue;
+    }
+
+    var result = safeFetchAndExtract(url) || {};
+    if (result.price == null) {
+      updates.push([lastPrice, now]);
+      continue;
+    }
+
+    newPrice = result.price;
+    newChecked = now;
+
+    if (lastPrice === '' || lastPrice == null) {
+      updates.push([newPrice, newChecked]);
+    } else if (newPrice !== lastPrice) {
+      var diff = newPrice - lastPrice;
+      if (!changesByProduct[productId]) changesByProduct[productId] = [];
+      changesByProduct[productId].push({
+        shopName: shopName,
+        oldPrice: lastPrice,
+        newPrice: newPrice,
+        diff: diff,
+        url: url,
+        productName: productName
+      });
+      updates.push([newPrice, newChecked]);
+    } else {
+      updates.push([lastPrice, newChecked]);
+    }
+  }
+
+  sh.getRange(2, 5, updates.length, 2).setValues(updates);
+
+  Object.keys(changesByProduct).forEach(function (productId) {
+    sendCompetitorChangeMail_(productId, changesByProduct[productId]);
+  });
+}
+
+// Stuurt één mail per productId met alle prijswijzigingen bij concurrenten
+function sendCompetitorChangeMail_(productId, changesArray) {
+  if (!changesArray || !changesArray.length) return;
+  var mainProduct = findMainProductById_(productId) || {};
+  var subject = '[Prijswijziging concurrent] ' + (mainProduct.name || productId);
+
+  var rows = changesArray.slice().sort(function (a, b) { return a.newPrice - b.newPrice; }).map(function (c) {
+    return '<tr>' +
+      '<td>' + c.shopName + '</td>' +
+      '<td>€ ' + formatPrice_(c.oldPrice) + '</td>' +
+      '<td>€ ' + formatPrice_(c.newPrice) + '</td>' +
+      '<td>€ ' + formatPrice_(c.diff) + '</td>' +
+      '<td><a href="' + c.url + '">' + 'Link' + '</a></td>' +
+      '</tr>';
+  }).join('');
+
+  var intro = '<p>Product: ' + (mainProduct.name || productId) + '</p>';
+  if (mainProduct.mainUrl) {
+    intro += '<p>Hoofd-URL: <a href="' + mainProduct.mainUrl + '">' + mainProduct.mainUrl + '</a></p>';
+  }
+
+  var body = intro + '<table border="1" cellpadding="6" cellspacing="0">' +
+    '<tr><th>Shop</th><th>Oude prijs</th><th>Nieuwe prijs</th><th>Verschil</th><th>URL</th></tr>' +
+    rows +
+    '</table>';
+
+  var recipient = Session.getActiveUser().getEmail();
+  MailApp.sendEmail({
+    to: recipient,
+    subject: subject,
+    htmlBody: body
+  });
+}
+
+// Zoekt het hoofdproduct op basis van ProductId in Overzicht
+function findMainProductById_(productId) {
+  if (!productId) return null;
+  var ss = SpreadsheetApp.getActive();
+  var overview = ss.getSheetByName(SHEETS.OVERZICHT);
+  if (!overview) return null;
+  var last = overview.getLastRow();
+  if (last < 2) return null;
+  var headers = overview.getRange(1, 1, 1, overview.getLastColumn()).getValues()[0];
+  var map = headerMap_(headers);
+  var idxId = map['productid'];
+  var idxName = map['product'];
+  var idxUrl = map['url 1'];
+  if (idxId == null) return null;
+  var data = overview.getRange(2, 1, last - 1, headers.length).getValues();
+  for (var i = 0; i < data.length; i++) {
+    if (String(data[i][idxId] || '').trim() === productId) {
+      return {
+        rowIndex: i + 2,
+        productId: productId,
+        name: idxName == null ? '' : data[i][idxName],
+        mainUrl: idxUrl == null ? '' : data[i][idxUrl]
+      };
+    }
+  }
+  return null;
+}
+
+// Formatteert prijzen naar string met 2 decimalen
+function formatPrice_(n) {
+  if (n == null || n === '') return '';
+  return Number(n).toFixed(2);
+}
+
+// Optionele helper om een dagelijkse trigger te maken voor de concurrent-check
+function scheduleCompetitorCheckDaily() {
+  ScriptApp.newTrigger('checkCompetitorPricesAndNotify')
+    .timeBased()
+    .everyDays(1)
+    .create();
 }
