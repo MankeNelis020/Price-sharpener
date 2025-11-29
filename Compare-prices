@@ -462,62 +462,52 @@ function extractProductUrlsFromSearch_(shopKey, html, shopConfig) {
 
     var domain = shopConfig.domain.replace(/^www\./, '').toLowerCase();
     var seen = {};
+    var rawCount = 0;
 
-    // Gebruik jouw bestaande normalizer, maar dan expliciet op het shop-domein
-    function normalizeToAbsolute_(raw) {
-      if (!raw) return '';
-      var url = String(raw).trim().replace(/&amp;/g, '&');
+    // Alle anchors pakken, we filteren daarna
+    var re = /<a[^>]+href=["']([^"']+)["'][^>]*>/gi;
+    var m;
+    while ((m = re.exec(html)) !== null && urls.length < 15) {
+      rawCount++;
+      var href = m[1];
+      if (!href) continue;
 
-      // dingen die sowieso geen product zijn
-      if (url[0] === '#') return '';
-      if (/^(mailto:|tel:|javascript:)/i.test(url)) return '';
+      href = href.replace(/&amp;/g, '&');
 
-      // relatieve -> absolute URL
-      if (url.indexOf('//') === 0) {
-        url = 'https:' + url;
-      } else if (url.indexOf('/') === 0) {
-        url = 'https://' + domain + url;
-      } else if (!/^https?:\/\//i.test(url)) {
-        url = 'https://' + domain + (url[0] === '/' ? '' : '/') + url;
+      // Direct wat pure rommel skippen
+      if (/^#/i.test(href)) continue;
+      if (/^(mailto:|tel:|javascript:)/i.test(href)) continue;
+
+      // Naar absolute URL normaliseren
+      var abs = href;
+      if (href.indexOf('//') === 0) {
+        abs = 'https:' + href;
+      } else if (href.indexOf('/') === 0) {
+        abs = 'https://' + domain + href;
+      } else if (!/^https?:\/\//i.test(href)) {
+        abs = 'https://' + domain + (href.charAt(0) === '/' ? '' : '/') + href;
       }
-      return url;
-    }
-
-    function considerUrl(rawHref) {
-      if (!rawHref || urls.length >= 5) return;
-
-      var abs = normalizeToAbsolute_(rawHref);
-      if (!abs) return;
 
       try {
         var u = new URL(abs);
         var host = u.hostname.replace(/^www\./, '').toLowerCase();
-        if (host.indexOf(domain) === -1) return;
+        if (host.indexOf(domain) === -1) continue;
 
         var path = u.pathname || '/';
 
-        // duidelijke niet-product dingen eruit
-        if (/\.(svg|png|jpe?g|gif|webp)$/i.test(path)) return;
-        if (/\/(account|customer|login|register|cart|winkelwagen|basket|wishlist|klantenservice|contact|search|zoeken)\b/i.test(path)) return;
+        // Navigatie / account / cart / search / service skippen
+        if (/\/(account|customer|login|register|cart|winkelwagen|wishlist|search|zoeken|klantenservice|service)\b/i.test(path)) {
+          continue;
+        }
 
-        // simpele dedup
-        if (seen[abs]) return;
+        // Dubbele links negeren
+        if (seen[abs]) continue;
         seen[abs] = true;
 
         urls.push(abs);
       } catch (e) {
-        // kapotte URL? overslaan
+        // kapotte URL -> negeren
       }
-    }
-
-    // 1) alle <a ... href="..."> uit de HTML trekken
-    var hrefRe = /<a\b[^>]*href=["']([^"']+)["'][^>]*>/gi;
-    var m;
-    var rawCount = 0;
-    while ((m = hrefRe.exec(html)) !== null && rawCount < 500) { // cap voor performance
-      rawCount++;
-      considerUrl(m[1]);
-      if (urls.length >= 5) break;
     }
 
     Logger.log(
