@@ -582,8 +582,7 @@ function scoreCandidateUrl_(url, tokens, productId) {
     if (parsed.pathname && parsed.pathname.length < 80) score += 1;
     if (/\/(p|product)\//.test(parsed.pathname)) score += 1;
 
-    var minScore = Math.max(2, Math.ceil(tokens.length * 0.4));
-    var passed = score >= minScore && tokensHit >= Math.min(tokens.length, 2);
+    var passed = score >= 2;
 
     return { url: url, score: score, tokensHit: tokensHit, idHit: idHit, passed: passed };
   } catch (e) {
