@@ -473,6 +473,10 @@ function extractProductUrlsFromSearch_(shopKey, html, shopConfig) {
     var domain = shopConfig.domain.replace(/^www\./, '').toLowerCase();
     var seen = {};
     var rawCount = 0;
+    var filteredPath = 0;
+    var hostMismatch = 0;
+    var decodeFail = 0;
+    var added = 0;
 
     function hostMatchesDomain_(host, baseDomain) {
       var cleanHost = String(host || '').replace(/^www\./, '').toLowerCase();
@@ -484,56 +488,71 @@ function extractProductUrlsFromSearch_(shopKey, html, shopConfig) {
       return flatHost.indexOf(flatBase) !== -1;
     }
 
-    // Alle anchors pakken, we filteren daarna
-    var re = /<a[^>]+href=["']([^"']+)["'][^>]*>/gi;
-    var m;
-    while ((m = re.exec(html)) !== null && urls.length < 15 && rawCount < 800) {
-      rawCount++;
-      var href = m[1];
-      if (!href) continue;
+    function normalizeToAbsolute_(href) {
+      if (!href) return '';
+      var out = String(href).trim().replace(/&amp;/g, '&');
+      if (out.indexOf('#') === 0) return '';
+      if (/^(mailto:|tel:|javascript:)/i.test(out)) return '';
 
-      href = href.replace(/&amp;/g, '&');
-
-      // Direct wat pure rommel skippen
-      if (/^#/i.test(href)) continue;
-      if (/^(mailto:|tel:|javascript:)/i.test(href)) continue;
-
-      // Naar absolute URL normaliseren
-      var abs = href;
-      if (href.indexOf('//') === 0) {
-        abs = 'https:' + href;
-      } else if (href.indexOf('/') === 0) {
-        abs = 'https://' + domain + href;
-      } else if (!/^https?:\/\//i.test(href)) {
-        abs = 'https://' + domain + (href.charAt(0) === '/' ? '' : '/') + href;
+      if (out.indexOf('//') === 0) {
+        out = 'https:' + out;
+      } else if (out.indexOf('/') === 0) {
+        out = 'https://' + domain + out;
+      } else if (!/^https?:\/\//i.test(out)) {
+        out = 'https://' + domain + (out.charAt(0) === '/' ? '' : '/') + out;
       }
+      return out;
+    }
 
+    function considerUrl(raw) {
+      if (!raw || urls.length >= 15) return;
+      var abs = normalizeToAbsolute_(raw);
+      if (!abs) return;
       try {
-        var u = new URL(abs);
-        if (!hostMatchesDomain_(u.hostname, domain)) continue;
-
-        var path = u.pathname || '/';
-
-        // Navigatie / account / cart / search / service skippen
-        if (/\/(account|customer|login|register|cart|winkelwagen|wishlist|search|zoeken|klantenservice|service)\b/i.test(path)) {
-          continue;
+        var parsed = new URL(abs);
+        if (!hostMatchesDomain_(parsed.hostname, domain)) {
+          hostMismatch++;
+          return;
         }
 
-        // Dubbele links negeren
-        if (seen[abs]) continue;
-        seen[abs] = true;
+        var path = parsed.pathname || '/';
+        if (/\/(account|customer|login|register|cart|winkelwagen|wishlist|search|zoeken|klantenservice|service)\b/i.test(path)) {
+          filteredPath++;
+          return;
+        }
 
+        if (seen[abs]) return;
+        seen[abs] = true;
         urls.push(abs);
+        added++;
       } catch (e) {
-        // kapotte URL -> negeren
+        decodeFail++;
+      }
+    }
+
+    var anchorRe = /<a\b[^>]*?href=["']([^"']+)["'][^>]*?>/gi;
+    var m;
+    while ((m = anchorRe.exec(html)) !== null) {
+      rawCount++;
+      considerUrl(m[1]);
+      if (urls.length >= 15 || rawCount >= 1200) break;
+    }
+
+    if (urls.length === 0) {
+      Logger.log('EXTRACT [' + shopKey + '] no candidates after anchor parse, retrying generic href sweep');
+      var hrefRe = /href=["']([^"']+)["']/gi;
+      while ((m = hrefRe.exec(html)) !== null) {
+        rawCount++;
+        considerUrl(m[1]);
+        if (urls.length >= 15 || rawCount >= 2000) break;
       }
     }
 
     Logger.log(
       'EXTRACT [' + shopKey + '] domain=' + shopConfig.domain +
-      ' → ' + urls.length + ' product candidates (raw hrefs=' + rawCount + ')'
+      ' → ' + urls.length + ' product candidates (raw hrefs=' + rawCount + ', hostMismatch=' + hostMismatch + ', filteredPath=' + filteredPath + ', parseFail=' + decodeFail + ', added=' + added + ')'
     );
-    urls.slice(0, 3).forEach(function (u, idx) {
+    urls.slice(0, 5).forEach(function (u, idx) {
       Logger.log('EXTRACT [' + shopKey + '] candidate #' + (idx + 1) + ': ' + u);
     });
 
