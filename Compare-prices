@@ -464,10 +464,20 @@ function extractProductUrlsFromSearch_(shopKey, html, shopConfig) {
     var seen = {};
     var rawCount = 0;
 
+    function hostMatchesDomain_(host, baseDomain) {
+      var cleanHost = String(host || '').replace(/^www\./, '').toLowerCase();
+      var cleanBase = String(baseDomain || '').replace(/^www\./, '').toLowerCase();
+      if (!cleanHost || !cleanBase) return false;
+      if (cleanHost.indexOf(cleanBase) !== -1) return true;
+      var flatHost = cleanHost.replace(/[^a-z0-9]/g, '');
+      var flatBase = cleanBase.replace(/[^a-z0-9]/g, '');
+      return flatHost.indexOf(flatBase) !== -1;
+    }
+
     // Alle anchors pakken, we filteren daarna
     var re = /<a[^>]+href=["']([^"']+)["'][^>]*>/gi;
     var m;
-    while ((m = re.exec(html)) !== null && urls.length < 15) {
+    while ((m = re.exec(html)) !== null && urls.length < 15 && rawCount < 800) {
       rawCount++;
       var href = m[1];
       if (!href) continue;
@@ -490,8 +500,7 @@ function extractProductUrlsFromSearch_(shopKey, html, shopConfig) {
 
       try {
         var u = new URL(abs);
-        var host = u.hostname.replace(/^www\./, '').toLowerCase();
-        if (host.indexOf(domain) === -1) continue;
+        if (!hostMatchesDomain_(u.hostname, domain)) continue;
 
         var path = u.pathname || '/';
 
