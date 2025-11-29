@@ -401,6 +401,11 @@ function discoverCompetitorsForProduct_(mainProduct) {
     if (code !== 200) return;
 
     const html = resp.getContentText();
+    try {
+      Logger.log('HTML SNIPPET FOR [' + key + ']: ' + html.substring(0, 5000));
+    } catch (e) {
+      Logger.log('HTML snippet log failed for [' + key + ']: ' + e);
+    }
     const candidates = extractProductUrlsFromSearch_(key, html, shop) || [];
     Logger.log('DISCOVER [' + key + '] candidates count=' + candidates.length);
     candidates.forEach(function (rawUrl) {
@@ -473,10 +478,10 @@ function extractProductUrlsFromSearch_(shopKey, html, shopConfig) {
     var domain = shopConfig.domain.replace(/^www\./, '').toLowerCase();
     var seen = {};
     var rawCount = 0;
-    var filteredPath = 0;
-    var hostMismatch = 0;
-    var decodeFail = 0;
     var added = 0;
+    var hostMismatch = 0;
+    var filteredPath = 0;
+    var decodeFail = 0;
 
     function hostMatchesDomain_(host, baseDomain) {
       var cleanHost = String(host || '').replace(/^www\./, '').toLowerCase();
@@ -493,7 +498,6 @@ function extractProductUrlsFromSearch_(shopKey, html, shopConfig) {
       var out = String(href).trim().replace(/&amp;/g, '&');
       if (out.indexOf('#') === 0) return '';
       if (/^(mailto:|tel:|javascript:)/i.test(out)) return '';
-
       if (out.indexOf('//') === 0) {
         out = 'https:' + out;
       } else if (out.indexOf('/') === 0) {
@@ -504,8 +508,8 @@ function extractProductUrlsFromSearch_(shopKey, html, shopConfig) {
       return out;
     }
 
-    function considerUrl(raw) {
-      if (!raw || urls.length >= 15) return;
+    function considerUrl(raw, source) {
+      if (!raw || urls.length >= 10) return;
       var abs = normalizeToAbsolute_(raw);
       if (!abs) return;
       try {
@@ -514,37 +518,80 @@ function extractProductUrlsFromSearch_(shopKey, html, shopConfig) {
           hostMismatch++;
           return;
         }
-
         var path = parsed.pathname || '/';
-        if (/\/(account|customer|login|register|cart|winkelwagen|wishlist|search|zoeken|klantenservice|service)\b/i.test(path)) {
+        if (/\.(css|js|map|svg|png|jpe?g|gif|webp|ico)$/i.test(path)) {
           filteredPath++;
           return;
         }
-
+        if (/\/(account|customer|login|register|cart|winkelwagen|wishlist|klantenservice|service|search|zoeken)\b/i.test(path)) {
+          filteredPath++;
+          return;
+        }
         if (seen[abs]) return;
         seen[abs] = true;
         urls.push(abs);
         added++;
+        Logger.log('EXTRACT [' + shopKey + '] added from ' + source + ': ' + abs);
       } catch (e) {
         decodeFail++;
       }
     }
 
-    var anchorRe = /<a\b[^>]*?href=["']([^"']+)["'][^>]*?>/gi;
-    var m;
-    while ((m = anchorRe.exec(html)) !== null) {
-      rawCount++;
-      considerUrl(m[1]);
-      if (urls.length >= 15 || rawCount >= 1200) break;
+    var shopPatterns = {
+      babydump: [
+        /<a[^>]+class="[^"]*(product|product-item|product__link|product--link|product-image)[^"]*"[^>]*href=["']([^"']+)["'][^>]*>/gi,
+        /<a[^>]+href=["']([^"']+\.html)["'][^>]*class="[^"]*(card|product)[^"]*"[^>]*>/gi
+      ],
+      prenatal: [
+        /<a[^>]+class="[^"]*(product|product-item|product__link|product-link)[^"]*"[^>]*href=["']([^"']+)["'][^>]*>/gi,
+        /"productUrl"\s*:\s*"([^"']+)"/gi
+      ],
+      babyentiener: [
+        /<a[^>]+class="[^"]*(product|product-item|product-link|product-block)[^"]*"[^>]*href=["']([^"']+)["'][^>]*>/gi
+      ],
+      babyplanet: [
+        /<a[^>]+class="[^"]*(product|product-item|product-link|product__link)[^"]*"[^>]*href=["']([^"']+)["'][^>]*>/gi,
+        /"url"\s*:\s*"([^"']+babyplanet[^"']+)"/gi
+      ],
+      mamaloes: [
+        /<a[^>]+class="[^"]*(product|product-item|product-link|product-image)[^"]*"[^>]*href=["']([^"']+)["'][^>]*>/gi,
+        /"url"\s*:\s*"([^"']+mamaloes[^"']+)"/gi
+      ],
+      vanasten: [
+        /<a[^>]+class="[^"]*(product|product-item|product-link|product-image)[^"]*"[^>]*href=["']([^"']+)["'][^>]*>/gi,
+        /"url"\s*:\s*"([^"']+vanasten[^"']+)"/gi
+      ]
+    };
+
+    var patterns = shopPatterns[shopKey] || [];
+    patterns.forEach(function (re, idx) {
+      var m;
+      while ((m = re.exec(html)) !== null && rawCount < 1200 && urls.length < 10) {
+        rawCount++;
+        var candidate = m[2] || m[1];
+        considerUrl(candidate, 'shopPattern#' + (idx + 1));
+      }
+    });
+
+    if (urls.length === 0) {
+      Logger.log('EXTRACT [' + shopKey + '] no shop-pattern hits, using generic anchor sweep');
+      var anchorRe = /<a\b[^>]*href=["']([^"']+)["'][^>]*>/gi;
+      var m;
+      while ((m = anchorRe.exec(html)) !== null) {
+        rawCount++;
+        considerUrl(m[1], 'anchor');
+        if (urls.length >= 10 || rawCount >= 2000) break;
+      }
     }
 
     if (urls.length === 0) {
-      Logger.log('EXTRACT [' + shopKey + '] no candidates after anchor parse, retrying generic href sweep');
-      var hrefRe = /href=["']([^"']+)["']/gi;
-      while ((m = hrefRe.exec(html)) !== null) {
+      Logger.log('EXTRACT [' + shopKey + '] still empty, scanning for raw URLs in JSON/text');
+      var domainRe = new RegExp('https?:\\/\\/[^"\']*' + domain.replace(/\./g, '\\.') + '[^"\']+', 'gi');
+      var m;
+      while ((m = domainRe.exec(html)) !== null) {
         rawCount++;
-        considerUrl(m[1]);
-        if (urls.length >= 15 || rawCount >= 2000) break;
+        considerUrl(m[0], 'domainText');
+        if (urls.length >= 10 || rawCount >= 2500) break;
       }
     }
 
