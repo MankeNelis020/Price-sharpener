@@ -453,60 +453,106 @@ function chooseSearchQuery_(mainProduct) {
 
 // Haalt mogelijke product-URLs uit een zoekresultaat-HTML (shop-specifiek, max 5)
 function extractProductUrlsFromSearch_(shopKey, html, shopConfig) {
-  var urls = [];
-  var added = {};
-  var domain = (shopConfig && shopConfig.domain) ? shopConfig.domain : '';
+  try {
+    var urls = [];
+    var seen = {};
+    var domain = (shopConfig && shopConfig.domain) ? shopConfig.domain : '';
+    var normalizedDomain = domain.replace(/^www\./i, '');
 
-  function addUrl_(href) {
-    if (!href || urls.length >= 5) return;
-    var normalized = normalizeCandidateUrl_(href, shopConfig);
-    if (!normalized || isBlacklistedDomain_(normalized)) return;
-    if (!isProbableProductPath_(normalized)) return;
-    if (added[normalized]) return;
-    added[normalized] = true;
-    urls.push(normalized);
-  }
-
-  function collectFromRegex_(re) {
-    var m;
-    while ((m = re.exec(html)) !== null && urls.length < 5) {
-      addUrl_(m[1]);
-    }
-  }
-
-  switch (shopKey) {
-    case 'babydump':
-      collectFromRegex_(/<a[^>]+class="[^"]*(?:product|card)[^"]*"[^>]+href="([^"]+)"/gi);
-      collectFromRegex_(/<a[^>]+href="([^"]+)"[^>]+data-product-id/gi);
-      break;
-    case 'prenatal':
-      collectFromRegex_(/<a[^>]+class="[^"]*(?:product|product-item|product__image)[^"]*"[^>]+href="([^"]+)"/gi);
-      collectFromRegex_(/<a[^>]+href="([^"]+)"[^>]+data-product-id/gi);
-      break;
-    case 'babyentiener':
-      collectFromRegex_(/<a[^>]+class="[^"]*(?:product|product-item|product-grid-item)[^"]*"[^>]+href="([^"]+)"/gi);
-      collectFromRegex_(/<a[^>]+href="([^"]+)"[^>]+data-product-id/gi);
-      break;
-    case 'babyplanet':
-      collectFromRegex_(/<a[^>]+class="[^"]*(?:product|product-item|product-image)[^"]*"[^>]+href="([^"]+)"/gi);
-      collectFromRegex_(/<a[^>]+href="([^"]+)"[^>]+data-product-id/gi);
-      break;
-    case 'mamaloes':
-      collectFromRegex_(/<a[^>]+class="[^"]*(?:product|product-item|product-thumb|product-grid-product)[^"]*"[^>]+href="([^"]+)"/gi);
-      collectFromRegex_(/<a[^>]+href="([^"]+)"[^>]+data-product-id/gi);
-      break;
-    case 'vanasten':
-      collectFromRegex_(/<a[^>]+class="[^"]*(?:product|product-item|product-image)[^"]*"[^>]+href="([^"]+)"/gi);
-      collectFromRegex_(/<a[^>]+href="([^"]+)"[^>]+data-product-id/gi);
-      break;
-    default:
-      if (domain) {
-        collectFromRegex_(new RegExp('href="([^"]*' + domain.replace(/\./g, '\\.') + '[^"]*)"', 'gi'));
+    function normalizeToAbsolute_(raw) {
+      if (!raw) return '';
+      var url = String(raw).trim().replace(/&amp;/g, '&');
+      if (url.indexOf('#') === 0 || /^\s*(mailto:|tel:|javascript:)/i.test(url)) return '';
+      if (url.indexOf('//') === 0) {
+        url = 'https:' + url;
+      } else if (url.indexOf('/') === 0) {
+        url = 'https://' + domain + url;
+      } else if (!/^https?:\/\//i.test(url)) {
+        url = 'https://' + domain + (url.indexOf('/') === 0 ? '' : '/') + url;
       }
-  }
+      return url;
+    }
 
-  Logger.log('EXTRACT [' + shopKey + '] domain=' + domain + ' → ' + urls.length + ' product candidates');
-  return urls;
+    function acceptCandidate_(raw) {
+      if (!raw || urls.length >= 5) return;
+      var abs = normalizeToAbsolute_(raw);
+      if (!abs) return;
+      try {
+        var parsed = new URL(abs);
+        var host = (parsed.hostname || '').replace(/^www\./i, '');
+        var path = parsed.pathname || '';
+        if (host.indexOf(normalizedDomain) === -1) return;
+        if (!path || path === '/' || /\.(svg|png|jpg|jpeg|gif|webp|css|js)$/i.test(path)) return;
+        if (/\b(account|customer|login|register|cart|winkelwagen|wishlist|search|zoeken|filter)\b/i.test(path)) return;
+        if (path.split('/').length < 2) return;
+      } catch (e) {
+        return;
+      }
+      if (seen[abs]) return;
+      seen[abs] = true;
+      urls.push(abs);
+    }
+
+    function collectFromRegex_(re) {
+      if (!re) return;
+      var m;
+      while ((m = re.exec(html)) !== null && urls.length < 5) {
+        acceptCandidate_(m[1]);
+      }
+    }
+
+    var re;
+    switch (shopKey) {
+      case 'babydump':
+        re = /<a[^>]+href="([^"]+)"[^>]+class="[^"]*(?:product|product-item|product-link|product-image|product-card)[^"]*"/gi;
+        collectFromRegex_(re);
+        break;
+      case 'prenatal':
+        re = /<a[^>]+href="([^"]+)"[^>]+class="[^"]*(?:product|product-item|product-link|product__image|product--link)[^"]*"/gi;
+        collectFromRegex_(re);
+        break;
+      case 'babyentiener':
+        re = /<a[^>]+href="([^"]+)"[^>]+class="[^"]*(?:product|product-item|product-grid-item|product-card|product-link)[^"]*"/gi;
+        collectFromRegex_(re);
+        break;
+      case 'babyplanet':
+        re = /<a[^>]+href="([^"]+)"[^>]+class="[^"]*(?:product|product-item|product-image|product-link)[^"]*"/gi;
+        collectFromRegex_(re);
+        break;
+      case 'mamaloes':
+        re = /<a[^>]+href="([^"]+)"[^>]+class="[^"]*(?:product|product-item|product-thumb|product-grid-product|product-link)[^"]*"/gi;
+        collectFromRegex_(re);
+        break;
+      case 'vanasten':
+        re = /<a[^>]+href="([^"]+)"[^>]+class="[^"]*(?:product|product-item|product-image|product-link|product-card)[^"]*"/gi;
+        collectFromRegex_(re);
+        break;
+      default:
+        if (domain) {
+          collectFromRegex_(new RegExp('<a[^>]+href="([^"]*' + domain.replace(/\./g, '\\.') + '[^"]*)"[^>]*>', 'gi'));
+        }
+    }
+
+    if (urls.length === 0) {
+      var genericRe = /<a[^>]+href="([^"]+)"[^>]*>/gi;
+      var m2;
+      while ((m2 = genericRe.exec(html)) !== null && urls.length < 5) {
+        var href = m2[1];
+        if (!href || href.indexOf('#') === 0 || /^\s*(mailto:|tel:|javascript:)/i.test(href)) continue;
+        if (/\b(account|customer|login|register|cart|winkelwagen|wishlist|search|zoeken|filter)\b/i.test(href)) continue;
+        acceptCandidate_(href);
+      }
+    }
+
+    Logger.log('EXTRACT [' + shopKey + '] domain=' + domain + ' → ' + urls.length + ' product candidates');
+    urls.slice(0, 3).forEach(function (u, i) {
+      Logger.log('EXTRACT [' + shopKey + '] candidate #' + (i + 1) + ': ' + u);
+    });
+    return urls.slice(0, 5);
+  } catch (e) {
+    Logger.log('EXTRACT error for ' + shopKey + ': ' + e);
+    return [];
+  }
 }
 
 // Normaliseert een gevonden URL naar een absolute https-URL
