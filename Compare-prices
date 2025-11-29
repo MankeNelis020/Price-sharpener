@@ -381,6 +381,8 @@ function discoverCompetitorsForProduct_(mainProduct) {
   const sh = ensureConcurrentSheet_();
   const existing = buildCompetitorIndex_(sh);
 
+  Logger.log('DISCOVER start productId="' + (mainProduct.productId || '') + '" name="' + (mainProduct.name || '') + '" query="' + query + '"');
+
   Object.keys(SHOP_SEARCH).forEach(function (key) {
     const shop = SHOP_SEARCH[key];
     if (!shop || !shop.searchTemplate) return;
@@ -394,16 +396,24 @@ function discoverCompetitorsForProduct_(mainProduct) {
       return;
     }
     Utilities.sleep(300);
-    if (resp.getResponseCode() !== 200) return;
+    var code = resp.getResponseCode();
+    Logger.log('DISCOVER [' + key + '] GET ' + searchUrl + ' → HTTP ' + code);
+    if (code !== 200) return;
 
     const html = resp.getContentText();
     const candidates = extractProductUrlsFromSearch_(key, html, shop) || [];
+    Logger.log('DISCOVER [' + key + '] candidates count=' + candidates.length);
     candidates.forEach(function (rawUrl) {
       const normalized = normalizeCandidateUrl_(rawUrl, shop);
       if (!normalized || isBlacklistedDomain_(normalized)) return;
 
+      Logger.log('DISCOVER [' + key + '] verify candidate=' + normalized);
+
       const match = verifyProductMatch_(mainProduct, normalized, shop);
-      if (!match || !match.matched) return;
+      if (!match || !match.matched) {
+        Logger.log('DISCOVER [' + key + '] no match for ' + normalized);
+        return;
+      }
 
       const indexKey = makeKey_(mainProduct.productId || mainProduct.name, shop.displayName);
       const rowInfo = existing.get(indexKey);
