@@ -60,7 +60,7 @@ function prijsAgentConcurrenten() {
     'Product', 'Leverancier', 'URL', 'Prijs', 'Valuta', 'Gezocht op'
   ]);
   const snap    = ensureSheet_(ss, SHEET_SNAPSHOT, [
-    'Product', 'Leverancier', 'URL', 'Huidige prijs', 'Laatste prijs', 'Laagste prijs ooit', '% korting t.o.v. laatste', 'Laatst gecheckt'
+    'Product', 'Leverancier', 'URL', 'Huidige prijs', 'Laatste prijs', 'Laagste prijs ooit', '% korting t.o.v. laatste', 'Laatst gecheckt', 'LaatsteStatus'
   ]);
 
   // bouw in-memory prijs-historiek (laatste & laagste per product+leverancier)
@@ -69,6 +69,7 @@ function prijsAgentConcurrenten() {
   const now = new Date();
   const appendRows = [];   // voor Prijshistorie
   const snapshotRows = []; // voor Concurrenten (we schrijven daarna in bulk)
+  const failedChecks = [];
 
   for (const {query} of queries) {
     // 1) haal kandidaten op
@@ -83,12 +84,21 @@ function prijsAgentConcurrenten() {
       const last = histIndex.get(key)?.last ?? null;
       const low  = histIndex.get(key)?.low  ?? null;
 
+      const fetchResult = safeFetchAndExtract_(it.link);
+      const resolvedPrice = fetchResult.price ?? it.price;
+      const status = fetchResult.error || (resolvedPrice == null ? 'not-found' : 'ok');
+
+      if (status !== 'ok') {
+        failedChecks.push({ store: it.store, url: it.link, status });
+      }
+      if (resolvedPrice == null) continue;
+
       // schrijf naar historie-buffer
-      appendRows.push([query, it.store, it.link, it.price, it.currency || 'EUR', now]);
+      appendRows.push([query, it.store, it.link, resolvedPrice, it.currency || 'EUR', now]);
 
       // update index voor volgende hits binnen deze run
-      const newLast = it.price;
-      const newLow  = (low == null) ? it.price : Math.min(low, it.price);
+      const newLast = resolvedPrice;
+      const newLow  = (low == null) ? resolvedPrice : Math.min(low, resolvedPrice);
       histIndex.set(key, { last: newLast, low: newLow });
 
       // rij klaarzetten voor snapshot; % korting (kolom G) vullen we met sheet-formule
@@ -96,11 +106,12 @@ function prijsAgentConcurrenten() {
         query,                // A Product
         it.store,             // B Leverancier
         it.link,              // C URL
-        it.price,             // D Huidige prijs
+        resolvedPrice,        // D Huidige prijs
         last,                 // E Laatste prijs
         newLow,               // F Laagste prijs ooit
         '',                   // G % korting (komt als formule)
-        now                   // H Laatst gecheckt
+        now,                  // H Laatst gecheckt
+        status                // I LaatsteStatus
       ]);
     }
   }
@@ -127,6 +138,10 @@ function prijsAgentConcurrenten() {
     snap.getRange(2, 4, snapshotRows.length, 3).setNumberFormat('€ #,##0.00'); // D:E:F
     snap.getRange(2, 7, snapshotRows.length, 1).setNumberFormat('0,0%');       // G
     snap.getRange(2, 8, snapshotRows.length, 1).setNumberFormat('dd-mm-yyyy hh:mm'); // H
+  }
+
+  if (appendRows.length || failedChecks.length) {
+    sendReportEmail_(appendRows.length, failedChecks);
   }
 }
 
@@ -253,4 +268,59 @@ function parsePrice_(v) {
 }
 function toQueryString_(obj) {
   return Object.keys(obj).map(k => encodeURIComponent(k) + '=' + encodeURIComponent(obj[k])).join('&');
+}
+
+// Fetches a product page defensively and tries to extract a price. Returns a status object
+// so we can report mislukte checks apart.
+function safeFetchAndExtract_(url) {
+  if (!url) return { price: null, error: 'missing-url' };
+  try {
+    const resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true });
+    const code = resp.getResponseCode();
+    if (code >= 400) {
+      return { price: null, error: `http-${code}` };
+    }
+
+    const html = resp.getContentText();
+    const match = html.match(/€\s*([\d\.\,]+)/);
+    if (match) {
+      const parsed = parsePrice_(match[1]);
+      if (parsed != null) return { price: parsed, error: null };
+    }
+    return { price: null, error: 'not-found' };
+  } catch (err) {
+    Logger.log('safeFetchAndExtract_ error voor ' + url + ': ' + err);
+    return { price: null, error: 'fetch-failed' };
+  }
+}
+
+function sendReportEmail_(processedCount, failedChecks) {
+  const recipient = Session.getActiveUser().getEmail();
+  if (!recipient) return;
+
+  const lines = [];
+  lines.push(`Automatische prijscheck heeft ${processedCount} regels verwerkt.`);
+
+  if (failedChecks.length) {
+    lines.push('Mislukte checks:');
+    failedChecks.forEach(f => {
+      const label = `${f.store} (${f.status})`;
+      lines.push(`- ${label}: ${f.url}`);
+    });
+  }
+
+  const htmlLines = lines.map(line => {
+    if (!line.startsWith('- ')) return `<p>${line.replace('\n', '<br>')}</p>`;
+    const parts = line.replace(/^-\s*/, '').split(': ');
+    const label = parts[0];
+    const url = parts[1];
+    return `<div>• <strong>${label}</strong>: <a href="${url}">${url}</a></div>`;
+  }).join('');
+
+  MailApp.sendEmail({
+    to: recipient,
+    subject: 'Prijsscrape rapport',
+    body: lines.join('\n'),
+    htmlBody: htmlLines
+  });
 }
