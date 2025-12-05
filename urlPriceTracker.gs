@@ -349,35 +349,167 @@ function appendHistoryRows_(ss, rows) {
   sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
 }
 
+/**
+ * Probeert een prijs uit de HTML te halen en normaliseert die via parsePrice_.
+ * Geeft een Number terug (bijv. 399.95) of null als er niets gevonden wordt.
+ */
 function parsePriceFromHtml_(html) {
-  if (!html) {
-    return null;
+  if (!html) return null;
+
+  // 1) PROBEER JSON-LD / inline JSON MET "price"
+  try {
+    // Pak alle <script type="application/ld+json"> blokken
+    const scriptRegex = /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+    let match;
+    while ((match = scriptRegex.exec(html)) !== null) {
+      const jsonText = match[1].trim();
+      try {
+        const data = JSON.parse(jsonText);
+
+        // data kan object of array zijn → normaliseer naar array
+        const items = Array.isArray(data) ? data : [data];
+
+        for (let item of items) {
+          const priceCandidate = extractPriceFromObject_(item);
+          if (priceCandidate != null) {
+            const n = parsePrice_(priceCandidate);
+            if (typeof n === 'number' && !isNaN(n)) {
+              return n;
+            }
+          }
+        }
+      } catch (e) {
+        // als 1 JSON-blok faalt, ga gewoon naar de volgende
+      }
+    }
+  } catch (e) {
+    // negeren, we gaan naar volgende strategie
   }
 
-  var cleaned = String(html)
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/\s+/g, ' ');
-
-  var patterns = [
-    /"price"\s*:\s*"?([\d.,]+)"?/i,
-    /<meta[^>]*itemprop=["']price["'][^>]*content=["']([\d.,]+)["'][^>]*>/i,
-    /data-(?:price|product-price|price-amount)\s*=\s*"?([\d.,]+)"?/i,
-    /(?:€|&euro;|eur\b)\s*([\d]{1,3}(?:[\.\s']\d{3})*(?:,\d{2})?|\d+(?:,\d{2})?)/i,
-  ];
-
-  for (var i = 0; i < patterns.length; i++) {
-    var match = patterns[i].exec(cleaned);
-    if (match && match[1]) {
-      var numeric = match[1].replace(/[\.\s']/g, '').replace(',', '.');
-      var value = parseFloat(numeric);
-      if (isFinite(value)) {
-        return value;
+  // 2) META TAGS MET itemprop="price"
+  try {
+    const metaPriceRegex =
+      /<meta[^>]+itemprop=["']price["'][^>]*content=["']([^"']+)["'][^>]*>/i;
+    const metaMatch = metaPriceRegex.exec(html);
+    if (metaMatch && metaMatch[1]) {
+      const n = parsePrice_(metaMatch[1]);
+      if (typeof n === 'number' && !isNaN(n)) {
+        return n;
       }
+    }
+  } catch (e) {
+    // laat maar, volgende stap
+  }
+
+  // 3) DATA-ATTRIBUTES (data-price, data-product-price etc.)
+  try {
+    const dataAttrRegex =
+      /data-(?:price|product-price|price-amount)=["']([^"']+)["']/gi;
+    let m;
+    while ((m = dataAttrRegex.exec(html)) !== null) {
+      const n = parsePrice_(m[1]);
+      if (typeof n === 'number' && !isNaN(n)) {
+        return n;
+      }
+    }
+  } catch (e) {
+    // volgende stap
+  }
+
+  // 4) FALLBACK: zoek laatste "€ 1.234,56" achtige notatie in de HTML
+  try {
+    const euroRegex = /(?:€|\&euro;)\s*([\d\.\,]+)/gi;
+    let m;
+    let lastValue = null;
+    while ((m = euroRegex.exec(html)) !== null) {
+      lastValue = m[1];
+    }
+    if (lastValue != null) {
+      const n = parsePrice_(lastValue);
+      if (typeof n === 'number' && !isNaN(n)) {
+        return n;
+      }
+    }
+  } catch (e) {
+    // niets
+  }
+
+  // Als alle strategieën falen:
+  return null;
+}
+
+/**
+ * Helper voor parsePriceFromHtml_:
+ * loopt een JSON-object af en zoekt naar keys als "price", "offers.price", etc.
+ */
+function extractPriceFromObject_(obj) {
+  if (!obj || typeof obj !== 'object') return null;
+
+  // expliciete velden
+  if (obj.price != null) return obj.price;
+  if (obj.offers && obj.offers.price != null) return obj.offers.price;
+  if (Array.isArray(obj.offers)) {
+    for (let offer of obj.offers) {
+      if (offer && offer.price != null) return offer.price;
     }
   }
 
+  // generieke deep search op key "price"
+  for (let key in obj) {
+    if (!Object.prototype.hasOwnProperty.call(obj, key)) continue;
+    const val = obj[key];
+
+    if (key.toLowerCase() === 'price' && val != null) {
+      return val;
+    }
+
+    if (typeof val === 'object') {
+      const nested = extractPriceFromObject_(val);
+      if (nested != null) return nested;
+    }
+  }
   return null;
+}
+
+function parsePrice_(v) {
+  if (v == null) return null;
+
+  // 1) Als het al een Number is (vaak uit JSON-LD)
+  if (typeof v === 'number') {
+    let n = v;
+
+    // Heuristiek: sommige shops geven prijzen in centen terug (bijv. 39995 voor € 399,95)
+    // Voor babyproducten is een prijs van > 5.000 euro extreem onwaarschijnlijk.
+    // Als het een groot, heel getal is, behandelen we het als centen.
+    if (Number.isInteger(n) && n >= 5000) {
+      n = n / 100; // 39995 -> 399.95
+    }
+    return n;
+  }
+
+  // 2) Als het een string is
+  let s = String(v).trim();
+
+  // Case: pure digits zonder komma/punt, en minstens 4 cijfers (bijv. "39995")
+  // Grote kans dat dit centen zijn.
+  if (/^\d{4,}$/.test(s)) {
+    const raw = parseInt(s, 10);
+    if (!isNaN(raw)) {
+      if (raw >= 5000) {
+        return raw / 100; // 39995 -> 399.95
+      }
+      return raw; // kleinere getallen (bijv. "999") laten we staan als euro's
+    }
+  }
+
+  // 3) Normale NL/EN prijsstrings ("€ 399,95", "399.95", etc.)
+  s = s
+    .replace(/[^\d,\.]/g, '')  // alleen cijfers, komma en punt overhouden
+    .replace(/\./g, '')        // alle punten weg (duizend-separators)
+    .replace(',', '.');        // komma als decimaal
+
+  const n = parseFloat(s);
+  return isNaN(n) ? null : n;
 }
 
 function parseTitleFromHtml_(html) {
