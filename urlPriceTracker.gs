@@ -226,10 +226,11 @@ function toNumberOrNull_(value) {
 }
 
 function formatEuro_(value) {
-  if (!isFinite(value)) {
+  var num = toNumberOrNull_(value);
+  if (!isFinite(num)) {
     return '-';
   }
-  return '€ ' + value.toFixed(2);
+  return '€ ' + num.toFixed(2);
 }
 
 function ensureHistorySheet_(ss) {
