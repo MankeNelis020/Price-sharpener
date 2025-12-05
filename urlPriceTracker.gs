@@ -5,6 +5,61 @@ var HISTORY_SHEET_NAME = 'Prijshistorie_URLs';
  * Main entry point to check all tracked product URLs on sheet "Blad1".
  */
 function checkTrackedProductUrls() {
+  processTrackedProductUrls_();
+}
+
+/**
+ * Processes only the currently selected data rows on "Blad1".
+ */
+function checkSelectedTrackedProductUrls() {
+  var ss = SpreadsheetApp.getActive();
+  var sheet = ss.getSheetByName('Blad1');
+  if (!sheet) {
+    Logger.log('Sheet "Blad1" not found.');
+    return;
+  }
+
+  var range = ss.getActiveRange();
+  if (!range || range.getSheet().getName() !== sheet.getName()) {
+    Logger.log('Selecteer eerst rijen op Blad1.');
+    return;
+  }
+
+  var rowSelectionMap = {};
+  var startRow = range.getRow();
+  var endRow = startRow + range.getNumRows() - 1;
+  for (var r = startRow; r <= endRow; r++) {
+    if (r >= 2) { // skip header row
+      rowSelectionMap[r] = true;
+    }
+  }
+
+  if (Object.keys(rowSelectionMap).length === 0) {
+    Logger.log('Geen datarijen geselecteerd.');
+    return;
+  }
+
+  processTrackedProductUrls_(rowSelectionMap);
+}
+
+/**
+ * Adds a custom menu to launch sync actions.
+ */
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('Prijswatcher')
+    .addItem('Sync alle URLs', 'checkTrackedProductUrls')
+    .addItem('Sync geselecteerde rijen', 'checkSelectedTrackedProductUrls')
+    .addSeparator()
+    .addItem('Pas formattering toe', 'applyFormattingMenu_')
+    .addToUi();
+}
+
+/**
+ * Processes all rows or a specific selection of rows on "Blad1".
+ * @param {Object<string, boolean>} [rowSelectionMap] Optional map of row indexes (2-based) to limit processing.
+ */
+function processTrackedProductUrls_(rowSelectionMap) {
   var ss = SpreadsheetApp.getActive();
   var sheet = ss.getSheetByName('Blad1');
   if (!sheet) {
@@ -29,6 +84,9 @@ function checkTrackedProductUrls() {
 
   for (var i = 0; i < rows.length; i++) {
     var rowIndex = i + 2; // 1-based row number
+    if (rowSelectionMap && !rowSelectionMap[rowIndex]) {
+      continue;
+    }
     var row = rows[i];
 
     var url = row[0];
@@ -498,6 +556,16 @@ function applyFormatting_(sheet) {
   } catch (e) {
     Logger.log('Formatting error: %s', e);
   }
+}
+
+function applyFormattingMenu_() {
+  var ss = SpreadsheetApp.getActive();
+  var sheet = ss.getSheetByName('Blad1');
+  if (!sheet) {
+    Logger.log('Sheet "Blad1" not found.');
+    return;
+  }
+  applyFormatting_(sheet);
 }
 
 function ensureSheet_(ss, name, headers) {
