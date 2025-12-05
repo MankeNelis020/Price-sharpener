@@ -59,100 +59,109 @@ function checkTrackedProductUrls() {
     var lowestAfter = lowestBefore;
     var daling = 0;
 
+    var html = fetchHtml_(url);
+    if (!html) {
+      status = 'HTTP_ERROR';
+      historyRows.push(buildHistoryRow_({
+        timestamp: timestamp,
+        category: category,
+        product: product,
+        productId: productId,
+        url: url,
+        previousPrice: null,
+        newPrice: null,
+        lowestAfter: null,
+        daling: null,
+        brand: brand,
+        model: model,
+        status: status,
+      }));
+      continue;
+    }
+
     try {
-      var response = UrlFetchApp.fetch(url, {
-        followRedirects: true,
-        muteHttpExceptions: true,
-      });
-      var httpStatus = response.getResponseCode();
-      if (httpStatus !== 200) {
-        Logger.log('HTTP error for row %s (%s): %s', rowIndex, url, httpStatus);
-        status = 'HTTP_ERROR';
+      newPrice = parsePriceFromHtml_(html);
+      newTitle = parseTitleFromHtml_(html) || scrapedTitle || product || '';
+      newBrand = parseBrandFromHtml_(html) || scrapedBrand || brand || '';
+      newIds = parseIdsFromHtml_(html);
+
+      // Update scraped info
+      if (newTitle) {
+        updatedRow[12] = newTitle;
+      }
+      if (newBrand) {
+        updatedRow[13] = newBrand;
+      }
+      updatedRow[14] = newIds || '';
+
+      // Auto-fill product columns only if empty
+      if (!product && newTitle) {
+        updatedRow[2] = newTitle;
+        product = newTitle;
+      }
+      if (!brand && newBrand) {
+        updatedRow[4] = newBrand;
+        brand = newBrand;
+      }
+      if (!productId && newIds) {
+        var primaryId = extractPrimaryId_(newIds);
+        if (primaryId) {
+          updatedRow[3] = primaryId;
+          productId = primaryId;
+        }
+      }
+
+      // Auto-categorize if needed
+      if (!category) {
+        category = autoCategorizeRow_(categoriesConfig, {
+          product: product,
+          title: newTitle,
+          url: url,
+        });
+        if (category) {
+          updatedRow[1] = category;
+        }
+      }
+
+      if (!isFinite(newPrice)) {
+        status = 'PRICE_NOT_FOUND';
       } else {
-        var html = response.getContentText();
-        newPrice = parsePriceFromHtml_(html);
-        newTitle = parseTitleFromHtml_(html) || scrapedTitle || product || '';
-        newBrand = parseBrandFromHtml_(html) || scrapedBrand || brand || '';
-        newIds = parseIdsFromHtml_(html);
+        var oldLastPrice = lastPrice;
+        updatedRow[7] = oldLastPrice; // H: previous price
+        updatedRow[6] = newPrice; // G: last price
 
-        // Update scraped info
-        if (newTitle) {
-          updatedRow[12] = newTitle;
-        }
-        if (newBrand) {
-          updatedRow[13] = newBrand;
-        }
-        updatedRow[14] = newIds || '';
-
-        // Auto-fill product columns only if empty
-        if (!product && newTitle) {
-          updatedRow[2] = newTitle;
-          product = newTitle;
-        }
-        if (!brand && newBrand) {
-          updatedRow[4] = newBrand;
-          brand = newBrand;
-        }
-        if (!productId && newIds) {
-          var primaryId = extractPrimaryId_(newIds);
-          if (primaryId) {
-            updatedRow[3] = primaryId;
-            productId = primaryId;
-          }
-        }
-
-        // Auto-categorize if needed
-        if (!category) {
-          category = autoCategorizeRow_(categoriesConfig, {
-            product: product,
-            title: newTitle,
-            url: url,
-          });
-          if (category) {
-            updatedRow[1] = category;
-          }
-        }
-
-        if (!isFinite(newPrice)) {
-          status = 'PRICE_NOT_FOUND';
+        if (lowestBefore === null) {
+          lowestAfter = newPrice;
         } else {
-          var oldLastPrice = lastPrice;
-          updatedRow[7] = oldLastPrice; // H: previous price
-          updatedRow[6] = newPrice; // G: last price
-
-          if (lowestBefore === null) {
-            lowestAfter = newPrice;
-          } else {
-            lowestAfter = Math.min(lowestBefore, newPrice);
-          }
-          updatedRow[8] = lowestAfter; // I: lowest price
-
-          if (isFinite(previousPrice) && previousPrice > 0) {
-            daling = (previousPrice - newPrice) / previousPrice;
-          }
-          updatedRow[9] = daling; // J: daling %
-
-          updatedRow[11] = timestamp; // L: last check
-          updatedRow[15] = newPrice; // P: scraped price
-          updatedRow[16] = timestamp; // Q: scraped lastchecked
-
-          rowsData.push({
-            rowIndex: rowIndex,
-            groupKey: buildGroupKey_(productId, brand, model, product || newTitle),
-            category: category,
-            product: product || newTitle,
-            productId: productId,
-            brand: brand,
-            model: model,
-            url: url,
-            shopName: getShopNameFromUrl_(url),
-            previousPrice: previousPrice,
-            newPrice: newPrice,
-            lowestBefore: lowestBefore,
-            lowestAfter: lowestAfter,
-            percentageDrop: daling,
-          });
+          lowestAfter = Math.min(lowestBefore, newPrice);
         }
+        updatedRow[8] = lowestAfter; // I: lowest price
+
+        if (isFinite(previousPrice) && previousPrice > 0) {
+          daling = (previousPrice - newPrice) / previousPrice;
+        }
+        updatedRow[9] = daling; // J: daling %
+
+        updatedRow[11] = timestamp; // L: last check
+        updatedRow[15] = newPrice; // P: scraped price
+        updatedRow[16] = timestamp; // Q: scraped lastchecked
+
+        rowsData.push({
+          rowIndex: rowIndex,
+          groupKey: buildGroupKey_(productId, brand, model, product || newTitle),
+          category: category,
+          product: product || newTitle,
+          productId: productId,
+          brand: brand,
+          model: model,
+          url: url,
+          shopName: getShopNameFromUrl_(url),
+          previousPrice: previousPrice,
+          newPrice: newPrice,
+          lowestBefore: lowestBefore,
+          lowestAfter: lowestAfter,
+          percentageDrop: daling,
+        });
       }
     } catch (err) {
       Logger.log('Error for row %s (%s): %s', rowIndex, url, err);
@@ -537,4 +546,26 @@ function arraysEqual_(a, b) {
     if (a[i] !== b[i]) return false;
   }
   return true;
+}
+
+function fetchHtml_(url) {
+  var options = {
+    followRedirects: true,
+    muteHttpExceptions: true,
+    method: 'get',
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'nl-NL,nl;q=0.9,en-US;q=0.8,en;q=0.7',
+    },
+  };
+
+  var resp = UrlFetchApp.fetch(url, options);
+  var code = resp.getResponseCode();
+
+  if (code !== 200) {
+    Logger.log('HTTP error ' + code + ' for ' + url);
+    return null;
+  }
+  return resp.getContentText();
 }
