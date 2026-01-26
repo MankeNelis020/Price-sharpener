@@ -1,326 +1,851 @@
-/***** CONFIG *****/
-const SHEET_INPUT         = 'Blad1';        // leest C2:C (zoektermen)
-const SHEET_HISTORY       = 'Prijshistorie';// append-log
-const SHEET_SNAPSHOT      = 'Concurrenten'; // "Tabblad B"
-const SERPAPI_KEY         = PropertiesService.getScriptProperties().getProperty('SERPAPI_API_KEY');
+/***** CONSTANTS / HEADERS *****/
+var SHEET_INPUT = 'Blad1';
 
-// Whitelist (namen én domeinen; varianten/aliases inbegrepen)
-const WHITELIST = [
-  // Baby-speciaalzaken
-  'babypark','babypark.nl',
-  'prénatal','prenatal','prenatal.nl',
-  'babydump','baby-dump','baby-dump.nl','babydump.nl','babydump.be',
-  'van asten','vanasten','vanastenbabysuperstore','vanastenbabysuperstore.nl',
-  'ikenik','ikenik.nl',
-  'baby & tiener','babyentiener','baby-en-tiener','babyentiener.nl',
-  'mama loes','mamaloes','mamaloes.nl','mamaloesbabyshop','mamaloesbabyshop.nl',
-  'babyplanet','babyplanet.nl',
-  'babyhuis casita','babyhuiscasita','babyhuiscasita.nl',
-  'keekabuu','keekabuu.com','keekabuu.nl',
-  'pinkorblue','pinkorblue.nl','pinkorblue.be',
-
-  // (Merksites – soms scherpe acties)
-  'bugaboo','bugaboo.com',
-  'joolz','joolz.com',
-  'stokke','stokke.com',
-  'cybex','cybex-online.com',
-
-  // Grote retailers / marketplaces
-  'bol','bol.com',
-  'coolblue','coolblue.nl',
-  'amazon','amazon.nl',
-  'wehkamp','wehkamp.nl',
-  'mediamarkt','mediamarkt.nl',
-  'bcc','bcc.nl',
-  'blokker','blokker.nl',
-  'hema','hema.nl',
-  'ikea','ikea.com','ikea.nl',
-
-  // Drogisterijen / supermarkten (voor luiers/billen doekjes e.d.)
-  'kruidvat','kruidvat.nl',
-  'etos','etos.nl',
-  'trekpleister','trekpleister.nl',
-  'ah','albert heijn','ah.nl',
-  'jumbo','jumbo.com','jumbo.com/nl','jumbo.nl'
+var REQUIRED_HEADERS = [
+  { key: 'url', name: 'URL' },
+  { key: 'category', name: 'Categorie' },
+  { key: 'product', name: 'Product' },
+  { key: 'productId', name: 'ProductId' },
+  { key: 'brand', name: 'Merk' },
+  { key: 'model', name: 'Model' },
+  { key: 'lastPrice', name: 'Laatste prijs' },
+  { key: 'previousPrice', name: 'Vorige prijs' },
+  { key: 'lowestPrice', name: 'Laagste prijs' },
+  { key: 'pctDrop', name: '% daling' },
+  { key: 'watch', name: 'Watch' },
+  { key: 'lastCheck', name: 'Laatst gecheckt' },
+  { key: 'title', name: 'Titel (scraped)' },
+  { key: 'brandScraped', name: 'Merk (scraped)' },
+  { key: 'ids', name: 'Ids (scraped)' },
+  { key: 'status', name: 'Status' },
+  { key: 'debug', name: 'Debug' }
 ];
 
+var STATUS = {
+  OK: 'OK',
+  HTTP_403: 'HTTP_403',
+  HTTP_429: 'HTTP_429',
+  JS_REQUIRED: 'JS_REQUIRED',
+  BLOCKED: 'BLOCKED',
+  PRICE_NOT_FOUND: 'PRICE_NOT_FOUND',
+  PARSE_ERROR: 'PARSE_ERROR',
+  UNSUPPORTED: 'UNSUPPORTED'
+};
 
-/***** ENTRYPOINT *****/
-function prijsAgentConcurrenten() {
-  if (!SERPAPI_KEY) throw new Error('SERPAPI_API_KEY ontbreekt (Project Settings → Script properties).');
+var DOMAIN_PARSERS = {
+  'beliani.nl': parseBeliani_,
+  'kwantum.nl': parseKwantum_,
+  'mattsleeps.com': parseMattsleeps_,
+  'beddenreus.nl': parseBeddenreus_,
+  'goossenswonen.nl': parseGoossenswonen_
+};
 
-  const ss = SpreadsheetApp.getActive();
-  const input = ss.getSheetByName(SHEET_INPUT);
-  if (!input) throw new Error(`Tabblad ${SHEET_INPUT} ontbreekt.`);
+/***** ENTRYPOINTS *****/
+function checkTrackedProductUrls() {
+  processTrackedProductUrls_();
+}
 
-  const queries = readQueries_(input);          // [{row, query}]
-  if (!queries.length) return;
+function checkSelectedTrackedProductUrls() {
+  var ss = SpreadsheetApp.getActive();
+  var sheet = ss.getSheetByName(SHEET_INPUT);
+  if (!sheet) {
+    Logger.log('Sheet "%s" not found.', SHEET_INPUT);
+    return;
+  }
 
-  const history = ensureSheet_(ss, SHEET_HISTORY, [
-    'Product', 'Leverancier', 'URL', 'Prijs', 'Valuta', 'Gezocht op'
-  ]);
-  const snap    = ensureSheet_(ss, SHEET_SNAPSHOT, [
-    'Product', 'Leverancier', 'URL', 'Huidige prijs', 'Laatste prijs', 'Laagste prijs ooit', '% korting t.o.v. laatste', 'Laatst gecheckt'
-  ]);
+  var range = ss.getActiveRange();
+  if (!range || range.getSheet().getName() !== sheet.getName()) {
+    Logger.log('Selecteer eerst rijen op %s.', SHEET_INPUT);
+    return;
+  }
 
-  // bouw in-memory prijs-historiek (laatste & laagste per product+leverancier)
-  const histIndex = buildHistoryIndex_(history);
-
-  const now = new Date();
-  const appendRows = [];   // voor Prijshistorie
-  const snapshotRows = []; // voor Concurrenten (we schrijven daarna in bulk)
-
-  for (const {query} of queries) {
-    // 1) haal kandidaten op
-    const items = searchGoogleShopping_(query);
-
-    // 2) whitelist-filter
-    const allowed = items.filter(it => isWhitelisted_(it.store));
-
-    // 3) voor elk resultaat: append naar historie + updaten van “laatste”/“laagste”
-    for (const it of allowed) {
-      const key  = makeKey_(query, it.store);
-      const last = histIndex.get(key)?.last ?? null;
-      const low  = histIndex.get(key)?.low  ?? null;
-
-      // schrijf naar historie-buffer
-      appendRows.push([query, it.store, it.link, it.price, it.currency || 'EUR', now]);
-
-      // update index voor volgende hits binnen deze run
-      const newLast = it.price;
-      const newLow  = (low == null) ? it.price : Math.min(low, it.price);
-      histIndex.set(key, { last: newLast, low: newLow });
-
-      // rij klaarzetten voor snapshot; % korting (kolom G) vullen we met sheet-formule
-      snapshotRows.push([
-        query,                // A Product
-        it.store,             // B Leverancier
-        it.link,              // C URL
-        it.price,             // D Huidige prijs
-        last,                 // E Laatste prijs
-        newLow,               // F Laagste prijs ooit
-        '',                   // G % korting (komt als formule)
-        now                   // H Laatst gecheckt
-      ]);
+  var rowSelectionMap = {};
+  var startRow = range.getRow();
+  var endRow = startRow + range.getNumRows() - 1;
+  for (var r = startRow; r <= endRow; r++) {
+    if (r >= 2) {
+      rowSelectionMap[r] = true;
     }
   }
 
-  // 4) flush append naar Historie (SAFE)
-  if (appendRows.length) {
-    const historyLast = history.getLastRow();     // header = 1 als leeg
-    const start = historyLast + 1;                // eerste vrije rij
-    history.insertRowsAfter(historyLast, appendRows.length);
-    history.getRange(start, 1, appendRows.length, appendRows[0].length).setValues(appendRows);
+  if (!Object.keys(rowSelectionMap).length) {
+    Logger.log('Geen datarijen geselecteerd.');
+    return;
   }
 
-  // 5) ververs snapshot-tab
-  clearKeepHeader_(snap);
-  if (snapshotRows.length) {
-    checkCompetitorPricesAndNotify(snapshotRows);
+  processTrackedProductUrls_(rowSelectionMap);
+}
 
-    snap.insertRowsAfter(1, snapshotRows.length);
-    snap.getRange(2, 1, snapshotRows.length, snapshotRows[0].length).setValues(snapshotRows);
+function testSingleUrl(url) {
+  if (!url) {
+    Logger.log('Geen URL opgegeven.');
+    return;
+  }
+  var result = fetchHtmlWithPipeline_(url);
+  if (result.status !== STATUS.OK) {
+    Logger.log('Fetch status: %s (%s)', result.status, result.debug || '-');
+    return;
+  }
+  var parsed = parseProductData_(result.html, url);
+  Logger.log('Parsed: %s', JSON.stringify({
+    price: parsed.price,
+    title: parsed.title,
+    brand: parsed.brand,
+    ids: parsed.ids,
+    status: parsed.status || STATUS.OK,
+    debug: result.debug || ''
+  }));
+}
 
-    // 6) % korting-formule + formats
-    const lastRow = 1 + snapshotRows.length;
-    for (let r = 2; r <= lastRow; r++) {
-      snap.getRange(r, 7).setFormula(`=ALS.FOUT((E${r}-D${r})/E${r};0)`); // kolom G
+function diagnoseRow(rowNumber) {
+  var ss = SpreadsheetApp.getActive();
+  var sheet = ss.getSheetByName(SHEET_INPUT);
+  if (!sheet) {
+    Logger.log('Sheet "%s" not found.', SHEET_INPUT);
+    return;
+  }
+  var row = Number(rowNumber);
+  if (!row || row < 2) {
+    Logger.log('Geef een geldig rijnummer ≥ 2.');
+    return;
+  }
+  var rowSelectionMap = {};
+  rowSelectionMap[row] = true;
+  processTrackedProductUrls_(rowSelectionMap);
+}
+
+/***** MAIN PROCESS (BATCH) *****/
+function processTrackedProductUrls_(rowSelectionMap) {
+  var ss = SpreadsheetApp.getActive();
+  var sheet = ss.getSheetByName(SHEET_INPUT);
+  if (!sheet) {
+    Logger.log('Sheet "%s" not found.', SHEET_INPUT);
+    return;
+  }
+
+  var headerMap = ensureHeaders_(sheet);
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) {
+    Logger.log('Geen datarijen gevonden.');
+    return;
+  }
+
+  var lastCol = sheet.getLastColumn();
+  var dataRange = sheet.getRange(2, 1, lastRow - 1, lastCol);
+  var rows = dataRange.getValues();
+  var now = new Date();
+
+  var stats = initStats_();
+
+  for (var i = 0; i < rows.length; i++) {
+    var rowIndex = i + 2;
+    if (rowSelectionMap && !rowSelectionMap[rowIndex]) {
+      continue;
     }
-    snap.getRange(2, 4, snapshotRows.length, 3).setNumberFormat('€ #,##0.00'); // D:E:F
-    snap.getRange(2, 7, snapshotRows.length, 1).setNumberFormat('0,0%');       // G
-    snap.getRange(2, 8, snapshotRows.length, 1).setNumberFormat('dd-mm-yyyy hh:mm'); // H
+
+    var row = rows[i];
+    var url = getCell_(row, headerMap.url);
+    if (!url) {
+      continue;
+    }
+
+    var watchFlag = getCell_(row, headerMap.watch);
+    if (watchFlag === '' || watchFlag == null) {
+      setCell_(row, headerMap.watch, true);
+      watchFlag = true;
+    }
+    if (!isWatchEnabled_(watchFlag)) {
+      continue;
+    }
+
+    var fetchResult = fetchHtmlWithPipeline_(url);
+    setCell_(row, headerMap.status, fetchResult.status);
+    setCell_(row, headerMap.debug, fetchResult.debug || '');
+    setCell_(row, headerMap.lastCheck, now);
+
+    if (fetchResult.status !== STATUS.OK) {
+      stats[fetchResult.status] = (stats[fetchResult.status] || 0) + 1;
+      continue;
+    }
+
+    var parsed;
+    try {
+      parsed = parseProductData_(fetchResult.html, url);
+    } catch (err) {
+      setCell_(row, headerMap.status, STATUS.PARSE_ERROR);
+      setCell_(row, headerMap.debug, 'PARSE_ERROR: ' + err);
+      stats[STATUS.PARSE_ERROR] += 1;
+      continue;
+    }
+
+    if (parsed.status && parsed.status !== STATUS.OK) {
+      setCell_(row, headerMap.status, parsed.status);
+      stats[parsed.status] = (stats[parsed.status] || 0) + 1;
+      continue;
+    }
+
+    if (!isFinite(parsed.price)) {
+      setCell_(row, headerMap.status, STATUS.PRICE_NOT_FOUND);
+      stats[STATUS.PRICE_NOT_FOUND] += 1;
+      continue;
+    }
+
+    setCell_(row, headerMap.status, STATUS.OK);
+    stats[STATUS.OK] += 1;
+
+    if (parsed.title) {
+      setCell_(row, headerMap.title, parsed.title);
+      if (!getCell_(row, headerMap.product)) {
+        setCell_(row, headerMap.product, parsed.title);
+      }
+    }
+    if (parsed.brand) {
+      setCell_(row, headerMap.brandScraped, parsed.brand);
+      if (!getCell_(row, headerMap.brand)) {
+        setCell_(row, headerMap.brand, parsed.brand);
+      }
+    }
+    if (parsed.ids) {
+      setCell_(row, headerMap.ids, parsed.ids);
+      if (!getCell_(row, headerMap.productId)) {
+        var primaryId = extractPrimaryId_(parsed.ids);
+        if (primaryId) {
+          setCell_(row, headerMap.productId, primaryId);
+        }
+      }
+    }
+
+    var lastPrice = toNumberOrNull_(getCell_(row, headerMap.lastPrice));
+    var previousPrice = lastPrice;
+    var lowestPrice = toNumberOrNull_(getCell_(row, headerMap.lowestPrice));
+
+    setCell_(row, headerMap.previousPrice, previousPrice);
+    setCell_(row, headerMap.lastPrice, parsed.price);
+
+    if (lowestPrice == null) {
+      lowestPrice = parsed.price;
+    } else {
+      lowestPrice = Math.min(lowestPrice, parsed.price);
+    }
+    setCell_(row, headerMap.lowestPrice, lowestPrice);
+
+    var pctDrop = null;
+    if (previousPrice && previousPrice > 0) {
+      pctDrop = (previousPrice - parsed.price) / previousPrice;
+    }
+    setCell_(row, headerMap.pctDrop, pctDrop);
   }
+
+  dataRange.setValues(rows);
+  logSummary_(stats);
 }
 
-/***** Helpers *****/
-function readQueries_(sheet) {
-  // leest C2:C (stop bij lege rij)
-  const col = 3; // C
-  const rows = sheet.getRange(2, col, Math.max(1, sheet.getLastRow() - 1), 1).getValues();
-  const out = [];
-  for (let i = 0; i < rows.length; i++) {
-    const q = String(rows[i][0] || '').trim();
-    if (!q) continue;
-    out.push({ row: 2 + i, query: q });
-  }
-  return out;
-}
+/***** FETCH PIPELINE + DETECTION *****/
+function fetchHtmlWithPipeline_(url) {
+  var strategies = [
+    {
+      name: 'A',
+      url: url,
+      options: {
+        followRedirects: true,
+        muteHttpExceptions: true,
+        method: 'get',
+        headers: buildHeaders_('nl-NL,nl;q=0.9,en-US;q=0.8,en;q=0.7', url)
+      }
+    },
+    {
+      name: 'B',
+      url: withCacheBuster_(url),
+      options: {
+        followRedirects: true,
+        muteHttpExceptions: true,
+        method: 'get',
+        headers: buildHeaders_('en-US,en;q=0.9,nl;q=0.8', url)
+      }
+    }
+  ];
 
-function ensureSheet_(ss, name, headers) {
-  let sh = ss.getSheetByName(name);
-  if (!sh) {
-    sh = ss.insertSheet(name);
-  }
-  if (sh.getLastRow() === 0) {
-    sh.appendRow(headers);
-  } else {
-    // zorg dat headers kloppen (optioneel)
-    const firstRow = sh.getRange(1, 1, 1, headers.length).getValues()[0];
-    const mismatch = headers.some((h, i) => firstRow[i] !== h);
-    if (mismatch) {
-      sh.clearContents();
-      sh.appendRow(headers);
+  var lastResponse = null;
+
+  for (var i = 0; i < strategies.length; i++) {
+    var strategy = strategies[i];
+    try {
+      var resp = UrlFetchApp.fetch(strategy.url, strategy.options);
+      lastResponse = resp;
+      var code = resp.getResponseCode();
+      var html = resp.getContentText() || '';
+      var finalUrl = getFinalUrl_(resp, strategy.url);
+      var finalHost = safeHost_(finalUrl);
+
+      var blockInfo = detectBlockSignals_(html);
+      if (blockInfo) {
+        return {
+          status: blockInfo.status,
+          html: null,
+          debug: buildDebugInfo_(code, finalHost, blockInfo.reason)
+        };
+      }
+
+      if (code === 200) {
+        return {
+          status: STATUS.OK,
+          html: html,
+          debug: buildDebugInfo_(code, finalHost, strategy.name)
+        };
+      }
+
+      if (code === 403 || code === 429) {
+        continue;
+      }
+    } catch (err) {
+      lastResponse = null;
     }
   }
-  return sh;
-}
 
-function clearKeepHeader_(sh) {
-  const last = sh.getLastRow();
-  if (last > 1) sh.getRange(2, 1, last - 1, sh.getMaxColumns()).clearContent();
-}
-
-// PATCH: robuuste whitelist (namen én domeinen)
-function isWhitelisted_(store) {
-  const s = (store || '').toLowerCase();
-  if (!s) return false;
-  const alias = s
-    .replace(/^www\./,'')
-    .replace(/\.nl$|\.com$|\.be$|\.de$/,'')
-    .replace(/-|\s/g,''); // baby-dump.nl -> babydump
-  return WHITELIST.some(w => {
-    const wnorm = w.toLowerCase().replace(/-|\s/g,'');
-    return s.includes(wnorm) || alias.includes(wnorm);
-  });
-}
-
-function makeKey_(product, store) {
-  return `${product}__${store}`.toLowerCase();
-}
-
-function buildHistoryIndex_(historySheet) {
-  // leest hele historie en bouwt {last, low} per (product, leverancier)
-  const lastRow = historySheet.getLastRow();
-  const idx = new Map();
-  if (lastRow < 2) return idx;
-
-  const vals = historySheet.getRange(2, 1, lastRow - 1, 6).getValues();
-  // Kolommen: Product, Leverancier, URL, Prijs, Valuta, Gezocht op
-  for (let i = 0; i < vals.length; i++) {
-    const [product, store, , price] = vals[i];
-    const key = makeKey_(product, store);
-    const rec = idx.get(key) || { last: null, low: null };
-    rec.last = price;                             // laatste = onderaan
-    rec.low  = rec.low == null ? price : Math.min(rec.low, price);
-    idx.set(key, rec);
-  }
-  return idx;
-}
-
-/***** SerpAPI wrapper (PATCH: store-fallback + logging) *****/
-function searchGoogleShopping_(query) {
-  const params = {
-    engine: 'google_shopping',
-    q: query,
-    hl: 'nl',
-    gl: 'nl',
-    api_key: SERPAPI_KEY
-  };
-  const url = 'https://serpapi.com/search.json?' + toQueryString_(params);
-  const resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true, followRedirects: true });
-  const code = resp.getResponseCode();
-  if (code !== 200) {
-    Logger.log('SerpAPI HTTP ' + code + ' → ' + resp.getContentText());
-    return [];
-  }
-  const json = JSON.parse(resp.getContentText());
-  const items = json.shopping_results || [];
-
-  const mapped = items.map(it => {
-    let link  = it.link || it.product_link || '';
-    let store = it.source || it.source_id || (it.sellers && it.sellers[0]?.source) || '';
-    if (!store && link) {
-      try { store = new URL(link).hostname.replace(/^www\./,''); } catch(e) {}
+  if (lastResponse) {
+    var lastCode = lastResponse.getResponseCode();
+    var lastUrl = getFinalUrl_(lastResponse, url);
+    var lastHost = safeHost_(lastUrl);
+    if (lastCode === 403) {
+      return {
+        status: STATUS.HTTP_403,
+        html: null,
+        debug: buildDebugInfo_(lastCode, lastHost, 'HTTP_403')
+      };
+    }
+    if (lastCode === 429) {
+      return {
+        status: STATUS.HTTP_429,
+        html: null,
+        debug: buildDebugInfo_(lastCode, lastHost, 'HTTP_429')
+      };
     }
     return {
-      title: it.title || '',
-      store,
-      price: parsePrice_(it.extracted_price ?? it.price),
-      currency: it.currency || 'EUR',
-      link
+      status: STATUS.UNSUPPORTED,
+      html: null,
+      debug: buildDebugInfo_(lastCode, lastHost, 'NON_200')
     };
-  }).filter(x => x.price != null && x.link);
-
-  Logger.log(`[SERP] "${query}" → ${items.length} items / na mapping ${mapped.length}`);
-  mapped.slice(0,5).forEach((m,i)=>Logger.log(`#${i+1} ${m.store} | €${m.price} | ${m.title}`));
-  return mapped;
-}
-
-function parsePrice_(v) {
-  if (v == null) return null;
-  if (typeof v === 'number') return v;
-  let s = String(v).replace(/[^\d,\.]/g, '').replace(/\./g, '').replace(',', '.');
-  const n = parseFloat(s);
-  return isNaN(n) ? null : n;
-}
-function toQueryString_(obj) {
-  return Object.keys(obj).map(k => encodeURIComponent(k) + '=' + encodeURIComponent(obj[k])).join('&');
-}
-
-function checkCompetitorPricesAndNotify(snapshotRows) {
-  const changesByProduct = new Map();
-
-  for (const row of snapshotRows) {
-    const [product, store, url, newPriceRaw, oldPriceRaw] = row;
-    const oldPrice = typeof oldPriceRaw === 'number' ? oldPriceRaw : parseFloat(oldPriceRaw);
-    const newPrice = typeof newPriceRaw === 'number' ? newPriceRaw : parseFloat(newPriceRaw);
-
-    if (!oldPrice || Number.isNaN(oldPrice) || Number.isNaN(newPrice)) continue;
-
-    const pctChange = (oldPrice - newPrice) / oldPrice;
-    if (pctChange < 0.05) continue;
-
-    const productChanges = changesByProduct.get(product) || [];
-    productChanges.push({
-      store,
-      url,
-      oldPrice,
-      newPrice,
-      percentage: pctChange
-    });
-    changesByProduct.set(product, productChanges);
   }
 
-  if (changesByProduct.size) {
-    sendCompetitorChangeMail_(changesByProduct);
-  }
+  return {
+    status: STATUS.UNSUPPORTED,
+    html: null,
+    debug: 'FETCH_FAILED'
+  };
 }
 
-function sendCompetitorChangeMail_(changesByProduct) {
-  if (!changesByProduct || !changesByProduct.size) return;
-
-  const subject = 'Concurrent met ≥5% prijsdaling gesignaleerd';
-  let html = '<p>De volgende prijsdalingen zijn gedetecteerd:</p>';
-  html += '<table border="1" cellpadding="4" cellspacing="0" style="border-collapse:collapse">';
-  html += '<tr><th>Product</th><th>Leverancier</th><th>Oude prijs</th><th>Nieuwe prijs</th><th>% verandering</th><th>URL</th></tr>';
-
-  for (const [product, changes] of changesByProduct.entries()) {
-    for (const change of changes) {
-      html += '<tr>' +
-        `<td>${escapeHtml_(product)}</td>` +
-        `<td>${escapeHtml_(change.store)}</td>` +
-        `<td>€ ${change.oldPrice.toFixed(2)}</td>` +
-        `<td>€ ${change.newPrice.toFixed(2)}</td>` +
-        `<td>${(change.percentage * 100).toFixed(1)}%</td>` +
-        `<td><a href="${escapeHtml_(change.url)}">link</a></td>` +
-      '</tr>';
+function detectBlockSignals_(html) {
+  if (!html) return null;
+  var text = String(html).toLowerCase();
+  var jsRequiredSignals = [
+    'enable javascript',
+    'checking your browser',
+    'cf-chl',
+    'cloudflare',
+    'attention required',
+    'perimeterx',
+    'px-captcha'
+  ];
+  for (var i = 0; i < jsRequiredSignals.length; i++) {
+    if (text.indexOf(jsRequiredSignals[i]) !== -1) {
+      return { status: STATUS.JS_REQUIRED, reason: jsRequiredSignals[i] };
     }
   }
 
-  html += '</table>';
-
-  MailApp.sendEmail({
-    to: Session.getActiveUser().getEmail(),
-    subject,
-    htmlBody: html
-  });
+  var blockedSignals = [
+    'access denied',
+    '403 forbidden',
+    'captcha',
+    'blocked'
+  ];
+  for (var j = 0; j < blockedSignals.length; j++) {
+    if (text.indexOf(blockedSignals[j]) !== -1) {
+      return { status: STATUS.BLOCKED, reason: blockedSignals[j] };
+    }
+  }
+  return null;
 }
 
-function escapeHtml_(s) {
-  return String(s || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+function buildHeaders_(acceptLanguage, url) {
+  return {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': acceptLanguage,
+    'Referer': getOrigin_(url)
+  };
+}
+
+function withCacheBuster_(url) {
+  var joiner = url.indexOf('?') === -1 ? '?' : '&';
+  return url + joiner + 'cb=' + new Date().getTime();
+}
+
+function getOrigin_(url) {
+  try {
+    var parsed = new URL(url);
+    return parsed.origin;
+  } catch (e) {
+    return url;
+  }
+}
+
+function safeHost_(url) {
+  try {
+    return new URL(url).hostname.replace(/^www\./i, '');
+  } catch (e) {
+    return '';
+  }
+}
+
+function getFinalUrl_(resp, fallbackUrl) {
+  try {
+    if (typeof resp.getFinalUrl === 'function') {
+      return resp.getFinalUrl();
+    }
+  } catch (e) {}
+  return fallbackUrl;
+}
+
+function buildDebugInfo_(code, host, reason) {
+  var parts = [];
+  if (code) parts.push('code=' + code);
+  if (host) parts.push('host=' + host);
+  if (reason) parts.push('reason=' + reason);
+  return parts.join(' | ');
+}
+
+/***** PARSERS (GENERIC + DOMAIN) *****/
+function parseProductData_(html, url) {
+  var host = safeHost_(url);
+  var parser = DOMAIN_PARSERS[host];
+  var parsed = parser ? parser(html, url) : null;
+
+  if (!parsed || !isFinite(parsed.price)) {
+    parsed = parseGeneric_(html);
+  }
+
+  parsed.title = parsed.title || parseTitleFromHtml_(html);
+  parsed.brand = parsed.brand || parseBrandFromHtml_(html);
+  parsed.ids = parsed.ids || parseIdsFromHtml_(html);
+
+  return parsed;
+}
+
+function parseGeneric_(html) {
+  return {
+    price: parsePriceFromHtml_(html),
+    title: '',
+    brand: '',
+    ids: ''
+  };
+}
+
+function parseBeliani_(html) {
+  var price = null;
+  var priceMatch = /"price"\s*:\s*"?([\d.,]+)"?/i.exec(html);
+  if (priceMatch) {
+    price = parsePrice_(priceMatch[1]);
+  }
+  if (!price) {
+    price = parsePriceFromHtml_(html);
+  }
+  return {
+    price: price,
+    title: parseTitleFromHtml_(html),
+    brand: parseBrandFromHtml_(html),
+    ids: parseIdsFromHtml_(html)
+  };
+}
+
+function parseKwantum_(html) {
+  var price = null;
+  var priceMatch = /data-price\s*=\s*"([\d.,]+)"/i.exec(html) ||
+    /"price"\s*:\s*"?([\d.,]+)"?/i.exec(html);
+  if (priceMatch) {
+    price = parsePrice_(priceMatch[1]);
+  }
+  if (!price) {
+    price = parsePriceFromHtml_(html);
+  }
+  return {
+    price: price,
+    title: parseTitleFromHtml_(html),
+    brand: parseBrandFromHtml_(html),
+    ids: parseIdsFromHtml_(html)
+  };
+}
+
+function parseMattsleeps_() {
+  return null;
+}
+
+function parseBeddenreus_() {
+  return null;
+}
+
+function parseGoossenswonen_() {
+  return null;
+}
+
+function parseTitleFromHtml_(html) {
+  if (!html) return '';
+  var ogMatch = /<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["'][^>]*>/i.exec(html);
+  if (ogMatch) return ogMatch[1].trim();
+  var titleMatch = /<title>([^<]{3,})<\/title>/i.exec(html);
+  if (titleMatch) return titleMatch[1].trim();
+  var h1Match = /<h1[^>]*>([^<]{3,})<\/h1>/i.exec(html);
+  return h1Match ? h1Match[1].trim() : '';
+}
+
+function parseBrandFromHtml_(html) {
+  if (!html) return '';
+  var ldMatch = /"brand"\s*:\s*\{"name"\s*:\s*"([^"]+)"/i.exec(html) ||
+    /"brand"\s*:\s*"([^"]+)"/i.exec(html);
+  if (ldMatch) return ldMatch[1].trim();
+  var metaMatch = /<meta[^>]*itemprop=["']brand["'][^>]*content=["']([^"']+)["'][^>]*>/i.exec(html);
+  return metaMatch ? metaMatch[1].trim() : '';
+}
+
+function parseIdsFromHtml_(html) {
+  if (!html) return '';
+  var found = { sku: '', mpn: '', gtin: '' };
+
+  try {
+    var scriptRegex = /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+    var m;
+    while ((m = scriptRegex.exec(html)) !== null) {
+      var jsonText = (m[1] || '').trim();
+      if (!jsonText) continue;
+      try {
+        var data = JSON.parse(jsonText);
+        var items = Array.isArray(data) ? data : [data];
+        for (var i = 0; i < items.length; i++) {
+          deepExtractIds_(items[i], found);
+          if (found.gtin && found.sku && found.mpn) break;
+        }
+      } catch (e) {}
+      if (found.gtin && found.sku && found.mpn) break;
+    }
+  } catch (e) {}
+
+  var ids = [];
+  if (found.gtin) ids.push('gtin:' + found.gtin);
+  if (found.sku) ids.push('sku:' + found.sku);
+  if (found.mpn) ids.push('mpn:' + found.mpn);
+  return ids.join(';');
+}
+
+function deepExtractIds_(obj, found) {
+  if (!obj || typeof obj !== 'object') return;
+  if (!found.sku && obj.sku) found.sku = String(obj.sku).trim();
+  if (!found.mpn && obj.mpn) found.mpn = String(obj.mpn).trim();
+  if (!found.gtin) {
+    if (obj.gtin13) found.gtin = String(obj.gtin13).trim();
+    else if (obj.gtin14) found.gtin = String(obj.gtin14).trim();
+    else if (obj.gtin12) found.gtin = String(obj.gtin12).trim();
+    else if (obj.gtin8) found.gtin = String(obj.gtin8).trim();
+    else if (obj.gtin) found.gtin = String(obj.gtin).trim();
+  }
+
+  if (Array.isArray(obj)) {
+    for (var i = 0; i < obj.length; i++) deepExtractIds_(obj[i], found);
+  } else {
+    for (var k in obj) {
+      if (!Object.prototype.hasOwnProperty.call(obj, k)) continue;
+      var v = obj[k];
+      if (v && typeof v === 'object') deepExtractIds_(v, found);
+    }
+  }
+}
+
+function parsePriceFromHtml_(html) {
+  if (!html) return null;
+
+  var candidates = [];
+  var jsonCandidates = extractPricesFromJsonLd_(html);
+  jsonCandidates.forEach(function(value) {
+    candidates.push({ value: value, weight: 3, source: 'jsonld' });
+  });
+
+  var metaMatch = /<meta[^>]*itemprop=["']price["'][^>]*content=["']([^"']+)["'][^>]*>/i.exec(html);
+  if (metaMatch) {
+    var metaPrice = parsePrice_(metaMatch[1]);
+    if (isFinite(metaPrice)) {
+      candidates.push({ value: metaPrice, weight: 3, source: 'meta' });
+    }
+  }
+
+  var dataAttrRegex = /data-(?:price|amount|product-price)=["']([^"']+)["']/gi;
+  var dataMatch;
+  while ((dataMatch = dataAttrRegex.exec(html)) !== null) {
+    var dataPrice = parsePrice_(dataMatch[1]);
+    if (isFinite(dataPrice)) {
+      candidates.push({ value: dataPrice, weight: 2, source: 'data' });
+    }
+  }
+
+  var regexMatches = extractEuroCandidates_(html);
+  regexMatches.forEach(function(candidate) {
+    candidates.push(candidate);
+  });
+
+  return selectBestPrice_(candidates);
+}
+
+function extractPricesFromJsonLd_(html) {
+  var results = [];
+  try {
+    var scriptRegex = /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+    var match;
+    while ((match = scriptRegex.exec(html)) !== null) {
+      var jsonText = match[1].trim();
+      if (!jsonText) continue;
+      try {
+        var data = JSON.parse(jsonText);
+        var items = Array.isArray(data) ? data : [data];
+        items.forEach(function(item) {
+          collectPricesFromObject_(item, results);
+        });
+      } catch (e) {}
+    }
+  } catch (e) {}
+  return results;
+}
+
+function collectPricesFromObject_(obj, results) {
+  if (!obj || typeof obj !== 'object') return;
+
+  if (obj.price != null) {
+    var p = parsePrice_(obj.price);
+    if (isFinite(p)) results.push(p);
+  }
+
+  if (obj.priceSpecification && obj.priceSpecification.price != null) {
+    var specPrice = parsePrice_(obj.priceSpecification.price);
+    if (isFinite(specPrice)) results.push(specPrice);
+  }
+
+  if (obj.offers) {
+    var offers = Array.isArray(obj.offers) ? obj.offers : [obj.offers];
+    offers.forEach(function(offer) {
+      if (offer.price != null) {
+        var offerPrice = parsePrice_(offer.price);
+        if (isFinite(offerPrice)) results.push(offerPrice);
+      }
+      if (offer.priceSpecification && offer.priceSpecification.price != null) {
+        var offerSpec = parsePrice_(offer.priceSpecification.price);
+        if (isFinite(offerSpec)) results.push(offerSpec);
+      }
+    });
+  }
+
+  if (obj.aggregateOffer) {
+    if (obj.aggregateOffer.lowPrice != null) {
+      var lowPrice = parsePrice_(obj.aggregateOffer.lowPrice);
+      if (isFinite(lowPrice)) results.push(lowPrice);
+    }
+    if (obj.aggregateOffer.highPrice != null) {
+      var highPrice = parsePrice_(obj.aggregateOffer.highPrice);
+      if (isFinite(highPrice)) results.push(highPrice);
+    }
+  }
+
+  if (Array.isArray(obj)) {
+    obj.forEach(function(child) { collectPricesFromObject_(child, results); });
+  } else {
+    for (var key in obj) {
+      if (!Object.prototype.hasOwnProperty.call(obj, key)) continue;
+      var value = obj[key];
+      if (value && typeof value === 'object') {
+        collectPricesFromObject_(value, results);
+      }
+    }
+  }
+}
+
+function extractEuroCandidates_(html) {
+  var candidates = [];
+  var regex = /(?:€|&euro;)\s*([\d\.,]+)/gi;
+  var match;
+  while ((match = regex.exec(html)) !== null) {
+    var raw = match[1];
+    var value = parsePrice_(raw);
+    if (!isFinite(value)) continue;
+    var start = Math.max(match.index - 100, 0);
+    var end = Math.min(match.index + 100, html.length);
+    var context = html.slice(start, end).toLowerCase();
+    var contextScore = context.indexOf('price') !== -1 || context.indexOf('prijs') !== -1 ? 1 : 0;
+    candidates.push({ value: value, weight: 1 + contextScore, source: 'regex' });
+  }
+  return candidates;
+}
+
+function selectBestPrice_(candidates) {
+  if (!candidates.length) return null;
+
+  var plausible = candidates.filter(function(c) {
+    return c.value >= 5 && c.value <= 15000;
+  });
+  var pool = plausible.length ? plausible : candidates;
+
+  var counts = {};
+  pool.forEach(function(c) {
+    var key = c.value.toFixed(2);
+    if (!counts[key]) counts[key] = { count: 0, value: c.value, weight: 0 };
+    counts[key].count += 1;
+    counts[key].weight = Math.max(counts[key].weight, c.weight);
+  });
+
+  var best = null;
+  for (var k in counts) {
+    var entry = counts[k];
+    if (!best) {
+      best = entry;
+      continue;
+    }
+    if (entry.count > best.count) {
+      best = entry;
+      continue;
+    }
+    if (entry.count === best.count && entry.weight > best.weight) {
+      best = entry;
+      continue;
+    }
+    if (entry.count === best.count && entry.weight === best.weight && entry.value < best.value) {
+      best = entry;
+    }
+  }
+
+  return best ? best.value : null;
+}
+
+function parsePrice_(value) {
+  if (value == null) return null;
+  if (typeof value === 'number') {
+    return isFinite(value) ? value : null;
+  }
+  var s = String(value).trim();
+  if (!s) return null;
+  s = s.replace(/[^0-9.,-]/g, '');
+  if (!s) return null;
+
+  var hasComma = s.indexOf(',') !== -1;
+  var hasDot = s.indexOf('.') !== -1;
+
+  if (hasComma && hasDot) {
+    if (s.lastIndexOf(',') > s.lastIndexOf('.')) {
+      s = s.replace(/\./g, '');
+      s = s.replace(',', '.');
+    } else {
+      s = s.replace(/,/g, '');
+    }
+  } else if (hasComma && !hasDot) {
+    s = s.replace(/\./g, '');
+    s = s.replace(',', '.');
+  } else if (hasDot && !hasComma) {
+    var parts = s.split('.');
+    if (parts.length > 2) {
+      var dec = parts.pop();
+      s = parts.join('') + '.' + dec;
+    }
+  }
+
+  var n = parseFloat(s);
+  return isFinite(n) ? n : null;
+}
+
+/***** HELPERS *****/
+function ensureHeaders_(sheet) {
+  var headerRow = sheet.getRange(1, 1, 1, Math.max(1, sheet.getLastColumn())).getValues()[0];
+  var headerMap = {};
+  var headers = headerRow.slice();
+
+  REQUIRED_HEADERS.forEach(function(def) {
+    var idx = headers.indexOf(def.name);
+    if (idx === -1) {
+      headers.push(def.name);
+      idx = headers.length - 1;
+    }
+    headerMap[def.key] = idx;
+  });
+
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  return headerMap;
+}
+
+function getCell_(row, index) {
+  if (index == null || index < 0) return '';
+  return row[index];
+}
+
+function setCell_(row, index, value) {
+  if (index == null || index < 0) return;
+  row[index] = value;
+}
+
+function isWatchEnabled_(flag) {
+  if (flag === true) return true;
+  if (typeof flag === 'string') {
+    var text = flag.trim().toLowerCase();
+    return ['ja', 'yes', 'y', 'true', '1'].indexOf(text) !== -1;
+  }
+  return false;
+}
+
+function toNumberOrNull_(value) {
+  var num = typeof value === 'number' ? value : parseFloat(value);
+  return isFinite(num) ? num : null;
+}
+
+function extractPrimaryId_(idsString) {
+  if (!idsString) return '';
+  var gtin = extractIdValue_(idsString, 'gtin');
+  if (gtin) return gtin;
+  var sku = extractIdValue_(idsString, 'sku');
+  if (sku) return sku;
+  var mpn = extractIdValue_(idsString, 'mpn');
+  if (mpn) return mpn;
+  return '';
+}
+
+function extractIdValue_(idsString, key) {
+  var parts = String(idsString || '').split(';');
+  var searchKey = String(key || '').toLowerCase();
+  for (var i = 0; i < parts.length; i++) {
+    var p = parts[i].trim();
+    if (!p) continue;
+    var idx = p.indexOf(':');
+    if (idx === -1) continue;
+    var k = p.slice(0, idx).trim().toLowerCase();
+    var v = p.slice(idx + 1).trim();
+    if (k === searchKey && v) return v;
+  }
+  return '';
+}
+
+function initStats_() {
+  var stats = {};
+  stats[STATUS.OK] = 0;
+  stats[STATUS.BLOCKED] = 0;
+  stats[STATUS.JS_REQUIRED] = 0;
+  stats[STATUS.PRICE_NOT_FOUND] = 0;
+  stats[STATUS.HTTP_403] = 0;
+  stats[STATUS.HTTP_429] = 0;
+  stats[STATUS.UNSUPPORTED] = 0;
+  stats[STATUS.PARSE_ERROR] = 0;
+  return stats;
+}
+
+function logSummary_(stats) {
+  Logger.log(
+    'Run summary: OK=%s BLOCKED=%s JS_REQUIRED=%s PRICE_NOT_FOUND=%s HTTP_403=%s HTTP_429=%s UNSUPPORTED=%s PARSE_ERROR=%s',
+    stats[STATUS.OK],
+    stats[STATUS.BLOCKED],
+    stats[STATUS.JS_REQUIRED],
+    stats[STATUS.PRICE_NOT_FOUND],
+    stats[STATUS.HTTP_403],
+    stats[STATUS.HTTP_429],
+    stats[STATUS.UNSUPPORTED],
+    stats[STATUS.PARSE_ERROR]
+  );
 }
